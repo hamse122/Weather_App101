@@ -1,0 +1,27 @@
+{
+  "name": "weather_app101",
+  "version": "1.0.0",
+  "description": "<<<<<<< Updated upstream\r # ashbl\r 2222\r =======\r # ashbl0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamse122/Weather_App101.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/hamse122/Weather_App101/issues"
+  },
+  "homepage": "https://github.com/hamse122/Weather_App101#readme",
+  "dependencies": {
+    "next": "^16.0.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}
