@@ -1,3 +1,4 @@
+// AI Assistant Demo PR: harmless comment to trigger PR
 import { useState, useRef, useEffect } from "react";
 
 /**
