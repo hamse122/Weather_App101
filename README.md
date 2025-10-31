@@ -2,7 +2,6 @@
 
 ![AI Assistant Demo PR](https://img.shields.io/badge/PR%20by-AI%20Assistant-blueviolet)
 
-
 A modern, professional weather app built with Next.js.
 
 ## Features
