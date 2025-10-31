@@ -4,6 +4,7 @@
 
 A modern, professional weather app built with Next.js.
 
+
 ## Features
 - City weather search with real-time API data
 - Professional, mobile-friendly UI
