@@ -1,22 +1,26 @@
-// Array utility functions
-const arrayUtils = {
-    // Remove duplicates from array
-    removeDuplicates: (arr) => [...new Set(arr)],
+// String manipulation helpers
+class StringHelpers {
+    static capitalize(str) {
+        return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+    }
     
-    // Flatten nested arrays
-    flatten: (arr) => arr.flat(Infinity),
+    static reverse(str) {
+        return str.split('').reverse().join('');
+    }
     
-    // Chunk array into smaller arrays
-    chunk: (arr, size) => {
-        const chunks = [];
-        for (let i = 0; i < arr.length; i += size) {
-            chunks.push(arr.slice(i, i + size));
-        }
-        return chunks;
-    },
+    static isPalindrome(str) {
+        const cleanStr = str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        return cleanStr === this.reverse(cleanStr);
+    }
     
-    // Get random item from array
-    randomItem: (arr) => arr[Math.floor(Math.random() * arr.length)]
-};
+    static truncate(str, length) {
+        return str.length > length ? str.substring(0, length) + '...' : str;
+    }
+    
+    static countVowels(str) {
+        const matches = str.match(/[aeiou]/gi);
+        return matches ? matches.length : 0;
+    }
+}
 
-module.exports = arrayUtils;
+module.exports = StringHelpers;
