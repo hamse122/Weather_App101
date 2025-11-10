@@ -3,9 +3,6 @@
  * Object deserialization utilities for converting various formats to objects
  */
 
-/**
- * Deserialization class for handling different deserialization formats
- */
 export class Deserialization {
     /**
      * Deserialize JSON string to object
@@ -121,7 +118,13 @@ export class Deserialization {
     /**
      * Deserialize URL into its components
      * @param {string} url - URL string
-     * @returns {{protocol: string, host: string, pathname: string, params: Record<string, any>, hash: string}}
+     * @returns {{
+     *   protocol: string,
+     *   host: string,
+     *   pathname: string,
+     *   params: Record<string, any>,
+     *   hash: string
+     * }}
      */
     static fromURL(url) {
         try {
