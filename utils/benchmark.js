@@ -45,6 +45,8 @@ export class Benchmark {
         const result2 = this.measure(fn2, iterations);
         
         const faster = result1.averageTime < result2.averageTime ? 'fn1' : 'fn2';
+        const speedup = faster === 'fn1'
+            ? result2.averageTime / result1.averageTime
         const speedup = faster === 'fn1' 
             ? result2.averageTime / result1.averageTime 
             : result1.averageTime / result2.averageTime;
