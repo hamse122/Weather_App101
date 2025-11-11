@@ -49,6 +49,7 @@ export class Compression {
                     i++;
                 }
                 decompressed += compressed[i].repeat(parseInt(count, 10));
+                decompressed += compressed[i].repeat(parseInt(count));
             } else {
                 decompressed += compressed[i];
             }
@@ -110,6 +111,7 @@ export class Compression {
             return compressed;
         }
         
+        // Fallback to simple compression
         return new TextEncoder().encode(this.compressRLE(str));
     }
     
@@ -149,3 +151,9 @@ export class Compression {
         return this.decompressRLE(new TextDecoder().decode(data));
     }
 }
+        // Fallback to simple decompression
+        return this.decompressRLE(new TextDecoder().decode(data));
+    }
+}
+
+
