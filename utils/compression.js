@@ -48,6 +48,7 @@ export class Compression {
                     count += compressed[i];
                     i++;
                 }
+                decompressed += compressed[i].repeat(parseInt(count, 10));
                 decompressed += compressed[i].repeat(parseInt(count));
             } else {
                 decompressed += compressed[i];
@@ -147,6 +148,9 @@ export class Compression {
             return new TextDecoder().decode(decompressed);
         }
         
+        return this.decompressRLE(new TextDecoder().decode(data));
+    }
+}
         // Fallback to simple decompression
         return this.decompressRLE(new TextDecoder().decode(data));
     }
