@@ -1,3 +1,197 @@
+// Web accessibility utilities
+class Accessibility {
+    constructor() {
+        this.observers = new Map();
+        this.focusTraps = new Map();
+        this.liveRegions = new Map();
+    }
+
+    trapFocus(container) {
+        const focusableElements = this.getFocusableElements(container);
+        if (focusableElements.length === 0) {
+            return null;
+        }
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+        const trapId = this.generateId();
+
+        const keyHandler = event => {
+            if (event.key !== 'Tab') {
+                return;
+            }
+            if (event.shiftKey && document.activeElement === firstElement) {
+                event.preventDefault();
+                lastElement.focus();
+            } else if (!event.shiftKey && document.activeElement === lastElement) {
+                event.preventDefault();
+                firstElement.focus();
+            }
+        };
+
+        container.addEventListener('keydown', keyHandler);
+        this.focusTraps.set(trapId, { container, keyHandler });
+        firstElement.focus();
+        return trapId;
+    }
+
+    releaseFocusTrap(trapId) {
+        const trap = this.focusTraps.get(trapId);
+        if (trap) {
+            trap.container.removeEventListener('keydown', trap.keyHandler);
+            this.focusTraps.delete(trapId);
+        }
+    }
+
+    getFocusableElements(container) {
+        const selectors = [
+            'a[href]',
+            'button:not([disabled])',
+            'input:not([disabled])',
+            'select:not([disabled])',
+            'textarea:not([disabled])',
+            '[tabindex]:not([tabindex="-1"])',
+            '[contenteditable="true"]'
+        ].join(', ');
+
+        return Array.from(container.querySelectorAll(selectors)).filter(element => {
+            const style = window.getComputedStyle(element);
+            return style.visibility !== 'hidden' && style.display !== 'none' && !element.hasAttribute('disabled');
+        });
+    }
+
+    createLiveRegion(type = 'polite', label = '') {
+        const region = document.createElement('div');
+        region.setAttribute('aria-live', type);
+        region.setAttribute('aria-atomic', 'true');
+        region.setAttribute('aria-label', label);
+        region.style.cssText = `
+            position: absolute;
+            left: -10000px;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+        `;
+
+        document.body.appendChild(region);
+        const regionId = this.generateId();
+        this.liveRegions.set(regionId, region);
+        return regionId;
+    }
+
+    announce(message, regionId = null, type = 'polite') {
+        let region;
+        if (regionId) {
+            region = this.liveRegions.get(regionId);
+        } else {
+            region = Array.from(this.liveRegions.values()).find(r => r.getAttribute('aria-live') === type);
+            if (!region) {
+                const newRegionId = this.createLiveRegion(type, 'Announcements');
+                region = this.liveRegions.get(newRegionId);
+            }
+        }
+
+        if (region) {
+            region.textContent = '';
+            region.textContent = message;
+        }
+    }
+
+    makeAccessibleList(container) {
+        const items = Array.from(container.children);
+        let focusedIndex = -1;
+
+        const setFocus = index => {
+            if (focusedIndex >= 0) {
+                items[focusedIndex].setAttribute('tabindex', '-1');
+            }
+            focusedIndex = index;
+            items[focusedIndex].setAttribute('tabindex', '0');
+            items[focusedIndex].focus();
+        };
+
+        container.addEventListener('keydown', event => {
+            switch (event.key) {
+                case 'ArrowDown':
+                    event.preventDefault();
+                    setFocus((focusedIndex + 1) % items.length);
+                    break;
+                case 'ArrowUp':
+                    event.preventDefault();
+                    setFocus((focusedIndex - 1 + items.length) % items.length);
+                    break;
+                case 'Home':
+                    event.preventDefault();
+                    setFocus(0);
+                    break;
+                case 'End':
+                    event.preventDefault();
+                    setFocus(items.length - 1);
+                    break;
+                default:
+                    break;
+            }
+        });
+
+        items.forEach((item, index) => {
+            item.setAttribute('tabindex', index === 0 ? '0' : '-1');
+            item.setAttribute('role', 'option');
+        });
+
+        if (items.length > 0) {
+            focusedIndex = 0;
+        }
+
+        container.setAttribute('role', 'listbox');
+    }
+
+    addSkipLink(text = 'Skip to main content', target = 'main') {
+        const skipLink = document.createElement('a');
+        skipLink.href = `#${target}`;
+        skipLink.textContent = text;
+        skipLink.style.cssText = `
+            position: absolute;
+            top: -40px;
+            left: 6px;
+            background: #000;
+            color: #fff;
+            padding: 8px;
+            text-decoration: none;
+            z-index: 10000;
+            transition: top 0.2s;
+        `;
+
+        skipLink.addEventListener('focus', () => {
+            skipLink.style.top = '6px';
+        });
+        skipLink.addEventListener('blur', () => {
+            skipLink.style.top = '-40px';
+        });
+
+        document.body.insertBefore(skipLink, document.body.firstChild);
+        return skipLink;
+    }
+
+    generateId() {
+        return `acc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    cleanup() {
+        this.liveRegions.forEach(region => {
+            if (region.parentNode) {
+                region.parentNode.removeChild(region);
+            }
+        });
+        this.liveRegions.clear();
+
+        this.focusTraps.forEach(trap => {
+            trap.container.removeEventListener('keydown', trap.keyHandler);
+        });
+        this.focusTraps.clear();
+    }
+}
+
+module.exports = Accessibility;
 /**
  * Accessibility Utility
  * Accessibility helpers for improving web accessibility
