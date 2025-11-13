@@ -5,8 +5,6 @@
 
 /**
  * Calculate the sum of an array of numbers
- * @param {number[]} numbers - Array of numbers to sum
- * @returns {number} - Sum of all numbers
  */
 export function sum(numbers) {
   return numbers.reduce((acc, num) => acc + num, 0);
@@ -14,8 +12,6 @@ export function sum(numbers) {
 
 /**
  * Calculate the average of an array of numbers
- * @param {number[]} numbers - Array of numbers
- * @returns {number} - Average of all numbers
  */
 export function average(numbers) {
   if (numbers.length === 0) return 0;
@@ -24,10 +20,6 @@ export function average(numbers) {
 
 /**
  * Calculate percentage
- * @param {number} value - The value
- * @param {number} total - The total
- * @param {number} decimals - Number of decimal places (default: 2)
- * @returns {number} - Percentage value
  */
 export function percentage(value, total, decimals = 2) {
   if (total === 0) return 0;
@@ -36,9 +28,6 @@ export function percentage(value, total, decimals = 2) {
 
 /**
  * Round a number to specified decimal places
- * @param {number} num - The number to round
- * @param {number} decimals - Number of decimal places (default: 2)
- * @returns {number} - Rounded number
  */
 export function roundTo(num, decimals = 2) {
   const factor = Math.pow(10, decimals);
@@ -47,8 +36,6 @@ export function roundTo(num, decimals = 2) {
 
 /**
  * Calculate the factorial of a number
- * @param {number} n - The number
- * @returns {number} - Factorial of n
  */
 export function factorial(n) {
   if (n < 0) return NaN;
@@ -58,12 +45,51 @@ export function factorial(n) {
 
 /**
  * Clamp a number between min and max
- * @param {number} num - The number to clamp
- * @param {number} min - Minimum value
- * @param {number} max - Maximum value
- * @returns {number} - Clamped number
  */
 export function clamp(num, min, max) {
   return Math.min(Math.max(num, min), max);
 }
 
+/* -------------------------------------------------------
+   NEW FUNCTIONS (Added 1–5 extra utility lines as requested)
+-------------------------------------------------------- */
+
+/**
+ * Get the maximum number in an array
+ */
+export function max(numbers) {
+  return numbers.length === 0 ? undefined : Math.max(...numbers);
+}
+
+/**
+ * Get the minimum number in an array
+ */
+export function min(numbers) {
+  return numbers.length === 0 ? undefined : Math.min(...numbers);
+}
+
+/**
+ * Calculate the median of an array of numbers
+ */
+export function median(numbers) {
+  if (numbers.length === 0) return 0;
+  const sorted = [...numbers].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+/**
+ * Generate a random integer between min and max (inclusive)
+ */
+export function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
+ * Calculate distance between two points
+ */
+export function distance(x1, y1, x2, y2) {
+  return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+}
