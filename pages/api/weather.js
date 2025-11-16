@@ -1,43 +1,80 @@
-// pages/api/weather.js  (or your existing file)
+// pages/api/weather.js
+
 export default async function handler(req, res) {
   try {
-    const q = req.query.q;
-    const includeForecast =
-      req.query.include === "forecast" || req.query.forecast === "1";
+    res.setHeader("Content-Type", "application/json");
 
-    if (!q) return res.status(400).json({ error: "Missing city ?q=" });
+    const { q, include, forecast } = req.query;
+    const includeForecast = include === "forecast" || forecast === "1";
 
-    const API_KEY = process.env.OPENWEATHER_KEY;
-    if (!API_KEY) return res.status(500).json({ error: "Missing OPENWEATHER_KEY" });
-
-    // Current weather
-    const currentUrl =
-      `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(q)}&units=metric&appid=${API_KEY}`;
-    const currentRes = await fetch(currentUrl);
-    const currentData = await currentRes.json();
-    if (!currentRes.ok) {
-      return res.status(currentRes.status).json({ error: currentData?.message || "Weather fetch failed" });
+    // Validate city
+    if (!q || q.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing city parameter (?q=city)",
+      });
     }
 
-    // Optionally pull 5-day forecast
+    const API_KEY = process.env.OPENWEATHER_KEY;
+    if (!API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: "Missing OPENWEATHER_KEY in environment",
+      });
+    }
+
+    // Prepare URLs
+    const currentUrl = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
+      q
+    )}&units=metric&appid=${API_KEY}`;
+
+    const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(
+      q
+    )}&units=metric&appid=${API_KEY}`;
+
+    // Fetch current + forecast in parallel when needed
+    const requests = includeForecast
+      ? [fetch(currentUrl), fetch(forecastUrl)]
+      : [fetch(currentUrl)];
+
+    const responses = await Promise.all(requests);
+    const data = await Promise.all(responses.map((r) => r.json()));
+
+    const currentData = data[0];
+
+    // Handle error for current weather
+    if (!responses[0].ok) {
+      return res.status(responses[0].status).json({
+        success: false,
+        error: currentData?.message || "Unable to fetch current weather",
+      });
+    }
+
     let forecastData = null;
+
+    // Handle forecast only if enabled
     if (includeForecast) {
-      const forecastUrl =
-        `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(q)}&units=metric&appid=${API_KEY}`;
-      const fRes = await fetch(forecastUrl);
-      forecastData = await fRes.json();
-      if (!fRes.ok) {
-        return res.status(fRes.status).json({ error: forecastData?.message || "Forecast fetch failed" });
+      forecastData = data[1];
+
+      if (!responses[1].ok) {
+        return res.status(responses[1].status).json({
+          success: false,
+          error: forecastData?.message || "Unable to fetch forecast",
+        });
       }
     }
 
-    // Return current + optional forecast
-    return res.status(200).json(
-      includeForecast
-        ? { ...currentData, forecast: forecastData }
-        : currentData
-    );
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Server error" });
+    // Final response
+    return res.status(200).json({
+      success: true,
+      city: q,
+      current: currentData,
+      forecast: includeForecast ? forecastData : undefined,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Server error",
+    });
   }
 }
