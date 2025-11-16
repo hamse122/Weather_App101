@@ -3,9 +3,6 @@
  * Advanced pagination system for handling item pagination
  */
 
-/**
- * Pagination class for managing paginated data
- */
 export class Pagination {
     constructor(items = [], pageSize = 10) {
         this.items = items;
@@ -16,17 +13,15 @@ export class Pagination {
     
     /**
      * Get the current page items
-     * @returns {Array} - Items for the current page
      */
     getCurrentPage() {
         const start = (this.currentPage - 1) * this.pageSize;
         const end = start + this.pageSize;
         return this.items.slice(start, end);
     }
-    
+
     /**
      * Move to the next page
-     * @returns {Array} - Items for the next page
      */
     nextPage() {
         if (this.currentPage < this.totalPages) {
@@ -34,10 +29,9 @@ export class Pagination {
         }
         return this.getCurrentPage();
     }
-    
+
     /**
      * Move to the previous page
-     * @returns {Array} - Items for the previous page
      */
     previousPage() {
         if (this.currentPage > 1) {
@@ -45,11 +39,9 @@ export class Pagination {
         }
         return this.getCurrentPage();
     }
-    
+
     /**
      * Go to a specific page
-     * @param {number} page - Page number to go to
-     * @returns {Array} - Items for the specified page
      */
     goToPage(page) {
         if (page >= 1 && page <= this.totalPages) {
@@ -57,10 +49,9 @@ export class Pagination {
         }
         return this.getCurrentPage();
     }
-    
+
     /**
      * Get pagination information
-     * @returns {Object} - Pagination info object
      */
     getPageInfo() {
         return {
@@ -73,16 +64,80 @@ export class Pagination {
             endIndex: Math.min(this.currentPage * this.pageSize, this.items.length)
         };
     }
-    
+
     /**
      * Update the items array
-     * @param {Array} newItems - New items to paginate
      */
     updateItems(newItems) {
         this.items = newItems;
         this.totalPages = Math.ceil(newItems.length / this.pageSize);
         this.currentPage = 1;
     }
+
+    /* ---------------------------------------------------------
+     * ADDITIONAL LINES ADDED BELOW
+     * --------------------------------------------------------- */
+
+    /**
+     * Change the page size dynamically
+     * @param {number} newSize
+     */
+    updatePageSize(newSize) {
+        if (newSize <= 0) throw new Error("Page size must be greater than zero.");
+        this.pageSize = newSize;
+        this.totalPages = Math.ceil(this.items.length / newSize);
+        this.currentPage = 1;
+    }
+
+    /**
+     * Check if the pagination is empty
+     * @returns {boolean}
+     */
+    isEmpty() {
+        return this.items.length === 0;
+    }
+
+    /**
+     * Get the first page
+     */
+    firstPage() {
+        this.currentPage = 1;
+        return this.getCurrentPage();
+    }
+
+    /**
+     * Get the last page
+     */
+    lastPage() {
+        this.currentPage = this.totalPages;
+        return this.getCurrentPage();
+    }
+
+    /**
+     * Append items to existing list
+     * @param {Array} extraItems
+     */
+    appendItems(extraItems) {
+        this.items = [...this.items, ...extraItems];
+        this.totalPages = Math.ceil(this.items.length / this.pageSize);
+    }
+
+    /**
+     * Remove an item by index
+     * @param {number} index
+     */
+    removeItem(index) {
+        if (index < 0 || index >= this.items.length) return false;
+        this.items.splice(index, 1);
+        this.totalPages = Math.ceil(this.items.length / this.pageSize);
+        if (this.currentPage > this.totalPages) this.currentPage = this.totalPages;
+        return true;
+    }
+
+    /**
+     * Reset pagination
+     */
+    reset() {
+        this.currentPage = 1;
+    }
 }
-
-
