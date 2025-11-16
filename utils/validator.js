@@ -1,8 +1,10 @@
 // Advanced data validation system
 class Validator {
-    constructor() {
+    constructor(options = {}) {
         this.rules = new Map();
         this.customValidators = new Map();
+        this.sanitizers = new Map();
+        this.validateAll = options.validateAll || false; // NEW
     }
     
     addRule(field, rule) {
@@ -11,32 +13,51 @@ class Validator {
         }
         this.rules.get(field).push(rule);
     }
+
+    addRules(field, ruleArray = []) { // NEW
+        ruleArray.forEach(r => this.addRule(field, r));
+    }
     
     addCustomValidator(name, validatorFn) {
         this.customValidators.set(name, validatorFn);
     }
+
+    addSanitizer(field, sanitizerFn) { // NEW
+        this.sanitizers.set(field, sanitizerFn);
+    }
+
+    loadSchema(schema) { // NEW
+        for (const field in schema) {
+            const { rules = [], sanitize } = schema[field];
+            this.addRules(field, rules);
+            if (sanitize) this.addSanitizer(field, sanitize);
+        }
+    }
     
-    validate(data) {
+    async validate(data) {
         const errors = {};
         const validData = {};
         
         for (const [field, rules] of this.rules) {
-            const value = data[field];
+            let value = data[field];
+
+            // Apply sanitizer
+            if (this.sanitizers.has(field)) {
+                value = this.sanitizers.get(field)(value);
+            }
             
             for (const rule of rules) {
-                const result = this.applyRule(rule, value, data);
+                const result = await this.applyRule(rule, value, data);
                 
                 if (result !== true) {
                     if (!errors[field]) errors[field] = [];
                     errors[field].push(result);
-                    break; // Stop at first error for this field
+
+                    if (!this.validateAll) break; // Stop on first error per field
                 }
             }
             
-            // Only add to validData if no errors
-            if (!errors[field]) {
-                validData[field] = value;
-            }
+            if (!errors[field]) validData[field] = value;
         }
         
         return {
@@ -46,23 +67,28 @@ class Validator {
         };
     }
     
-    applyRule(rule, value, allData) {
+    async applyRule(rule, value, allData) {
         if (typeof rule === 'function') {
-            return rule(value, allData);
+            return await rule(value, allData);
         }
         
         if (typeof rule === 'string') {
             const customValidator = this.customValidators.get(rule);
-            if (customValidator) {
-                return customValidator(value, allData);
-            }
+            if (customValidator) return await customValidator(value, allData);
         }
         
         if (rule.validator) {
-            return rule.validator(value, allData) || rule.message || 'Validation failed';
+            const response = await rule.validator(value, allData);
+            return response === true ? true : (rule.message || response || 'Validation failed');
         }
         
         return true;
+    }
+
+    formatErrors(errors) { // NEW
+        return Object.entries(errors)
+            .map(([field, msgs]) => `${field}: ${msgs.join(', ')}`)
+            .join('\n');
     }
 }
 
@@ -77,4 +103,3 @@ const builtInValidators = {
 };
 
 module.exports = { Validator, builtInValidators };
-
