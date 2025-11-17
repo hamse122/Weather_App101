@@ -1,132 +1,160 @@
 /**
  * Security Utilities
- * Security helpers for common security tasks
+ * Provides safe, reusable helpers for handling common security operations
+ * such as sanitization, hashing, token generation, and validation.
  */
 
-/**
- * SecurityUtils class for security-related utilities
- */
 export class SecurityUtils {
     /**
-     * Sanitize HTML string to prevent XSS
-     * @param {string} html - HTML string to sanitize
-     * @returns {string} - Sanitized HTML string
+     * Safely sanitize HTML content to prevent XSS.
+     * Converts HTML into plain text by escaping all tags.
+     * NOTE: For heavy sanitization, integrate DOMPurify.
+     *
+     * @param {string} html - The HTML string to sanitize.
+     * @returns {string} - Sanitized and safe HTML string.
      */
     static sanitizeHTML(html) {
-        const div = document.createElement('div');
-        div.textContent = html;
-        return div.innerHTML;
+        const wrapper = document.createElement('div');
+        wrapper.textContent = String(html);
+        return wrapper.innerHTML;
     }
-    
+
     /**
-     * Escape HTML special characters
-     * @param {string} str - String to escape
-     * @returns {string} - Escaped string
+     * Escape HTML special characters.
+     *
+     * @param {string} str - String to escape.
+     * @returns {string} - Escaped string safe for output.
      */
     static escapeHTML(str) {
+        if (!str) return '';
         const map = {
             '&': '&amp;',
             '<': '&lt;',
             '>': '&gt;',
             '"': '&quot;',
-            "'": '&#039;'
+            "'": '&#039;',
         };
-        return str.replace(/[&<>"']/g, m => map[m]);
+        return String(str).replace(/[&<>"']/g, char => map[char]);
     }
-    
+
     /**
-     * Generate a random token
-     * @param {number} length - Token length
-     * @returns {string} - Random token
+     * Generate a cryptographically secure random token.
+     *
+     * @param {number} length - Token length.
+     * @returns {string} - Secure random token.
      */
     static generateToken(length = 32) {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-        let token = '';
         const array = new Uint8Array(length);
         crypto.getRandomValues(array);
-        
-        for (let i = 0; i < length; i++) {
-            token += chars[array[i] % chars.length];
-        }
-        
-        return token;
+
+        return Array.from(array, v => chars[v % chars.length]).join('');
     }
-    
+
     /**
-     * Generate a random UUID
-     * @returns {string} - UUID string
+     * Generate a RFC4122 version 4 UUID using crypto API.
+     *
+     * @returns {string} - Random UUID (v4).
      */
     static generateUUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-            const r = Math.random() * 16 | 0;
-            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        if (crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+
+        // Fallback for older browsers
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+            const v = c === 'x' ? r : (r & 0x3) | 0x8;
             return v.toString(16);
         });
     }
-    
+
     /**
-     * Hash a string using SHA-256
-     * @param {string} str - String to hash
-     * @returns {Promise<string>} - Hashed string
+     * Hash a string using SHA-256 (crypto.subtle).
+     *
+     * @param {string} str - Input string to hash.
+     * @returns {Promise<string>} - Hexadecimal hash string.
      */
     static async hashSHA256(str) {
         const encoder = new TextEncoder();
         const data = encoder.encode(str);
         const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        const bytes = new Uint8Array(hashBuffer);
+
+        return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     }
-    
+
     /**
-     * Validate CSP (Content Security Policy) header
-     * @param {string} csp - CSP header value
-     * @returns {boolean} - True if CSP is valid
+     * Validate a Content Security Policy header.
+     * Ensures that mandatory directives exist.
+     *
+     * @param {string} csp - CSP header string.
+     * @returns {boolean} - True if valid CSP format is detected.
      */
     static validateCSP(csp) {
-        const directives = ['default-src', 'script-src', 'style-src', 'img-src', 'connect-src'];
-        return directives.some(directive => csp.includes(directive));
+        if (typeof csp !== 'string' || !csp.trim()) return false;
+
+        const requiredDirectives = [
+            'default-src',
+            'script-src',
+            'style-src',
+            'img-src',
+            'connect-src',
+        ];
+
+        return requiredDirectives.every(dir => csp.includes(dir));
     }
-    
+
     /**
-     * Check if a URL is safe
-     * @param {string} url - URL to check
-     * @returns {boolean} - True if URL is safe
+     * Check if a URL is safe and does not use dangerous schemes.
+     *
+     * @param {string} url - URL to validate.
+     * @returns {boolean} - True if safe.
      */
     static isSafeURL(url) {
         try {
             const parsed = new URL(url);
-            return !['javascript:', 'data:', 'vbscript:'].includes(parsed.protocol.toLowerCase());
+            const unsafeProtocols = ['javascript:', 'data:', 'vbscript:'];
+
+            return !unsafeProtocols.includes(parsed.protocol.toLowerCase());
         } catch {
             return false;
         }
     }
-    
+
     /**
-     * Validate password strength
-     * @param {string} password - Password to validate
-     * @returns {Object} - Validation result
+     * Validate password strength score based on security criteria.
+     *
+     * @param {string} password - Password to validate.
+     * @returns {{
+     *   strength: number,
+     *   feedback: string[],
+     *   isStrong: boolean
+     * }}
      */
     static validatePasswordStrength(password) {
-        const result = {
-            strength: 0,
-            feedback: []
+        const feedback = [];
+        let score = 0;
+
+        if (password.length >= 8) score++;
+        else feedback.push('Password must be at least 8 characters long');
+
+        if (/[a-z]/.test(password)) score++;
+        else feedback.push('Add at least one lowercase letter');
+
+        if (/[A-Z]/.test(password)) score++;
+        else feedback.push('Add at least one uppercase letter');
+
+        if (/[0-9]/.test(password)) score++;
+        else feedback.push('Include at least one number');
+
+        if (/[^a-zA-Z0-9]/.test(password)) score++;
+        else feedback.push('Use at least one special character');
+
+        return {
+            strength: score,
+            feedback,
+            isStrong: score >= 4,
         };
-        
-        if (password.length >= 8) result.strength++;
-        else result.feedback.push('Password should be at least 8 characters long');
-        
-        if (/[a-z]/.test(password)) result.strength++;
-        else result.feedback.push('Password should contain lowercase letters');
-        
-        if (/[A-Z]/.test(password)) result.strength++;
-        else result.feedback.push('Password should contain uppercase letters');
-        
-        if (/[0-9]/.test(password)) result.strength++;
-        else result.feedback.push('Password should contain numbers');
-        
-        if (/[^a-zA-Z0-9]/.test(password)) result.strength++;
-        else result.feedback.push('Password should contain special characters');
-        
-        return result;
     }
 }
