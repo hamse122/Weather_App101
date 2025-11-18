@@ -1,177 +1,218 @@
 /**
- * Debounce and Throttle Utility Functions
- * Provides performance optimization functions for event handling
+ * Performance Utility Functions (Optimized Version)
+ * Debounce, Throttle & Advanced Debounce Helpers
  */
 
 /**
- * Debounce a function - delays execution until after wait time has passed
- * @param {Function} func - The function to debounce
- * @param {number} wait - Wait time in milliseconds
- * @param {boolean} immediate - If true, trigger on leading edge instead of trailing
- * @returns {Function} - Debounced function
+ * Debounce (simple)
+ * Delays execution until user stops triggering for `wait` ms
  */
-export function debounce(func, wait, immediate = false) {
+export function debounce(func, wait = 0, immediate = false) {
   let timeout;
-  return function executedFunction(...args) {
+
+  return function debounced(...args) {
+    const context = this;
+
     const later = () => {
       timeout = null;
-      if (!immediate) func(...args);
+      if (!immediate) func.apply(context, args);
     };
-    const callNow = immediate && !timeout;
+
+    const shouldCallNow = immediate && !timeout;
+
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
-    if (callNow) func(...args);
-  };
-}
 
-/**
- * Throttle a function - limits execution to at most once per wait time
- * @param {Function} func - The function to throttle
- * @param {number} limit - Time limit in milliseconds
- * @returns {Function} - Throttled function
- */
-export function throttle(func, limit) {
-  let inThrottle;
-  return function executedFunction(...args) {
-    if (!inThrottle) {
-      func(...args);
-      inThrottle = true;
-      setTimeout(() => (inThrottle = false), limit);
+    if (shouldCallNow) {
+      return func.apply(context, args);
     }
   };
 }
 
 /**
- * Debounce with leading and trailing options
- * @param {Function} func - The function to debounce
- * @param {number} wait - Wait time in milliseconds
- * @param {Object} options - Options object with leading and trailing flags
- * @returns {Function} - Debounced function
+ * Throttle (simple)
+ * Ensures func runs at most once per `limit` ms
  */
-export function debounceAdvanced(func, wait, options = {}) {
-  let timeout;
-  let maxWait;
-  let maxWaitTimeout;
-  let lastCallTime;
+export function throttle(func, limit = 0) {
+  let inThrottle = false;
+
+  return function throttled(...args) {
+    const context = this;
+
+    if (!inThrottle) {
+      func.apply(context, args);
+      inThrottle = true;
+
+      setTimeout(() => {
+        inThrottle = false;
+      }, limit);
+    }
+  };
+}
+
+/**
+ * Throttle (advanced)
+ * Supports { leading: Boolean, trailing: Boolean }
+ */
+export function throttleAdvanced(func, wait = 0, opts = {}) {
+  let timeout = null;
+  let lastArgs = null;
+  let lastThis = null;
+  let lastCallTime = 0;
+
+  const leading = opts.leading ?? true;
+  const trailing = opts.trailing ?? true;
+
+  const invoke = (time) => {
+    lastCallTime = time;
+    func.apply(lastThis, lastArgs);
+    lastArgs = lastThis = null;
+  };
+
+  const startTimer = (remaining) => {
+    timeout = setTimeout(() => {
+      timeout = null;
+      if (trailing && lastArgs) invoke(Date.now());
+    }, remaining);
+  };
+
+  return function throttled(...args) {
+    const now = Date.now();
+
+    if (!lastCallTime && !leading) {
+      lastCallTime = now;
+    }
+
+    const remaining = wait - (now - lastCallTime);
+    lastArgs = args;
+    lastThis = this;
+
+    if (remaining <= 0 || remaining > wait) {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      invoke(now);
+    } else if (!timeout && trailing) {
+      startTimer(remaining);
+    }
+  };
+}
+
+/**
+ * Advanced Debounce
+ * Improved clarity, safety, modern JS.
+ */
+export function debounceAdvanced(func, wait = 0, options = {}) {
+  if (typeof func !== "function") {
+    throw new TypeError("Expected a function");
+  }
+
+  let timeout = null;
+  let lastArgs = null;
+  let lastThis = null;
+  let result;
+  let lastCallTime = 0;
   let lastInvokeTime = 0;
-  let leading = false;
-  let maxing = false;
-  let trailing = true;
 
-  if (typeof func !== 'function') {
-    throw new TypeError('Expected a function');
-  }
+  const leading = options.leading ?? false;
+  const trailing = options.trailing ?? true;
+  const maxing = "maxWait" in options;
 
-  wait = Number(wait) || 0;
-  if (typeof options === 'object') {
-    leading = !!options.leading;
-    trailing = 'trailing' in options ? !!options.trailing : trailing;
-    maxing = 'maxWait' in options;
-    maxWait = maxing ? Math.max(Number(options.maxWait) || 0, wait) : maxWait;
-  }
+  const maxWait = maxing
+    ? Math.max(Number(options.maxWait) || 0, wait)
+    : null;
 
-  function invokeFunc(time) {
-    const args = lastArgs;
-    const thisArg = lastThis;
-
-    lastArgs = lastThis = undefined;
+  const invokeFunc = (time) => {
+    result = func.apply(lastThis, lastArgs);
     lastInvokeTime = time;
-    result = func.apply(thisArg, args);
+    lastArgs = lastThis = null;
     return result;
-  }
+  };
 
-  function leadingEdge(time) {
+  const shouldInvoke = (time) => {
+    const timeSinceCall = time - lastCallTime;
+    const timeSinceInvoke = time - lastInvokeTime;
+
+    return (
+      lastCallTime === 0 ||
+      timeSinceCall >= wait ||
+      timeSinceCall < 0 ||
+      (maxing && timeSinceInvoke >= maxWait)
+    );
+  };
+
+  const remainingWait = (time) => {
+    const timeSinceCall = time - lastCallTime;
+    const timeSinceInvoke = time - lastInvokeTime;
+
+    const waitRemaining = wait - timeSinceCall;
+    return maxing
+      ? Math.min(waitRemaining, maxWait - timeSinceInvoke)
+      : waitRemaining;
+  };
+
+  const timerExpired = () => {
+    const now = Date.now();
+    if (shouldInvoke(now)) {
+      return trailingEdge(now);
+    }
+    timeout = setTimeout(timerExpired, remainingWait(now));
+  };
+
+  const leadingEdge = (time) => {
     lastInvokeTime = time;
     timeout = setTimeout(timerExpired, wait);
     return leading ? invokeFunc(time) : result;
-  }
+  };
 
-  function remainingWait(time) {
-    const timeSinceLastCall = time - lastCallTime;
-    const timeSinceLastInvoke = time - lastInvokeTime;
-    const timeWaiting = wait - timeSinceLastCall;
-
-    return maxing
-      ? Math.min(timeWaiting, maxWait - timeSinceLastInvoke)
-      : timeWaiting;
-  }
-
-  function shouldInvoke(time) {
-    const timeSinceLastCall = time - lastCallTime;
-    const timeSinceLastInvoke = time - lastInvokeTime;
-
-    return (
-      lastCallTime === undefined ||
-      timeSinceLastCall >= wait ||
-      timeSinceLastCall < 0 ||
-      (maxing && timeSinceLastInvoke >= maxWait)
-    );
-  }
-
-  function timerExpired() {
-    const time = Date.now();
-    if (shouldInvoke(time)) {
-      return trailingEdge(time);
-    }
-    timeout = setTimeout(timerExpired, remainingWait(time));
-  }
-
-  function trailingEdge(time) {
-    timeout = undefined;
+  const trailingEdge = (time) => {
+    timeout = null;
 
     if (trailing && lastArgs) {
       return invokeFunc(time);
     }
-    lastArgs = lastThis = undefined;
+
+    lastArgs = lastThis = null;
     return result;
-  }
-
-  function cancel() {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
-    }
-    if (maxWaitTimeout !== undefined) {
-      clearTimeout(maxWaitTimeout);
-    }
-    lastInvokeTime = 0;
-    lastArgs = lastCallTime = lastThis = timeout = undefined;
-  }
-
-  function flush() {
-    return timeout === undefined ? result : trailingEdge(Date.now());
-  }
-
-  function pending() {
-    return timeout !== undefined;
-  }
-
-  let lastArgs, lastThis, result;
-  return {
-    cancel,
-    flush,
-    pending,
-    (...args) => {
-      const time = Date.now();
-      const isInvoking = shouldInvoke(time);
-
-      lastArgs = args;
-      lastThis = this;
-      lastCallTime = time;
-
-      if (isInvoking) {
-        if (timeout === undefined) {
-          return leadingEdge(lastCallTime);
-        }
-        if (maxing) {
-          timeout = setTimeout(timerExpired, wait);
-          return invokeFunc(lastCallTime);
-        }
-      }
-      if (timeout === undefined) {
-        timeout = setTimeout(timerExpired, wait);
-      }
-      return result;
-    },
   };
-}
 
+  const debounced = function (...args) {
+    const now = Date.now();
+
+    lastCallTime = now;
+    lastArgs = args;
+    lastThis = this;
+
+    const shouldCall = shouldInvoke(now);
+
+    if (shouldCall) {
+      if (!timeout) {
+        return leadingEdge(now);
+      }
+      if (maxing) {
+        timeout = setTimeout(timerExpired, wait);
+        return invokeFunc(now);
+      }
+    }
+
+    if (!timeout) {
+      timeout = setTimeout(timerExpired, wait);
+    }
+
+    return result;
+  };
+
+  debounced.cancel = () => {
+    if (timeout) clearTimeout(timeout);
+    timeout = lastArgs = lastThis = lastCallTime = lastInvokeTime = null;
+  };
+
+  debounced.flush = () => {
+    return timeout ? trailingEdge(Date.now()) : result;
+  };
+
+  debounced.pending = () => !!timeout;
+
+  return debounced;
+}
