@@ -1,10 +1,75 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap');
-body {
-  background: #ededf3;
-  color: #011b39;
-  font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+:root {
+  /* Color Palette */
+  --bg-color: #ededf3;
+  --text-color: #011b39;
+  --primary-color: #1f5eff;
+  --border-color: #ccd2e0;
+
+  /* Typography */
+  --font-main: 'Inter', 'Segoe UI', Arial, sans-serif;
+
+  /* Layout */
+  --radius: 8px;
+  --transition: 0.25s ease;
+}
+
+* {
   margin: 0;
   padding: 0;
-  overflow-x: hidden;
+  box-sizing: border-box;
 }
-input, button { font-family: inherit; }
+
+body {
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-family: var(--font-main);
+  overflow-x: hidden;
+  line-height: 1.6;
+}
+
+/* General Form Styles */
+input,
+button,
+select,
+textarea {
+  font-family: inherit;
+  font-size: 15px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color);
+  outline: none;
+  transition: var(--transition);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.2);
+}
+
+button {
+  background: var(--primary-color);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover {
+  background: #164ad9;
+}
+
+/* Smooth Scroll */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Responsive Container */
+.container {
+  width: min(95%, 1200px);
+  margin: auto;
+  padding: 20px 0;
+}
