@@ -1,119 +1,204 @@
 /**
- * Error Handler Utility
- * Centralized error handling and logging system
+ * Enhanced Error Handler Utility
+ * Advanced centralized error handling system with categorization, backoff,
+ * async/sync wrapping, and extensible event-driven architecture.
  */
 
-/**
- * ErrorHandler class for managing errors
- */
-export class ErrorHandler {
+export class EnhancedErrorHandler {
     constructor() {
         this.handlers = new Map();
-        this.logger = null;
+        this.logger = console.error;
+        this.subscribers = new Set();
+        this.globalFallback = null;
     }
-    
+
+    /* -------------------------------------------------------------------------- */
+    /*                                CONFIGURATION                               */
+    /* -------------------------------------------------------------------------- */
+
     /**
-     * Set custom logger function
-     * @param {Function} logger - Logger function
+     * Use custom logger
+     * @param {Function} logger
      */
     setLogger(logger) {
         this.logger = logger;
     }
-    
+
     /**
-     * Register an error handler for a specific error type
-     * @param {string} errorType - Error type
-     * @param {Function} handler - Handler function
+     * Set fallback handler when no handler matches
+     * @param {Function} handler
      */
-    registerHandler(errorType, handler) {
-        this.handlers.set(errorType, handler);
+    setFallback(handler) {
+        this.globalFallback = handler;
     }
-    
+
     /**
-     * Handle an error
-     * @param {Error} error - Error object
-     * @param {Object} context - Additional context
+     * Register specific error handler
+     * @param {string} type
+     * @param {Function} handler
+     */
+    registerHandler(type, handler) {
+        this.handlers.set(type, handler);
+    }
+
+    /**
+     * Subscribe to all errors (observer pattern)
+     * @param {Function} subscriber
+     */
+    onError(subscriber) {
+        this.subscribers.add(subscriber);
+        return () => this.subscribers.delete(subscriber); // unsubscribe
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                               ERROR HANDLING                               */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * Handle error with logging + handler resolution
+     * @param {Error} error
+     * @param {Object} context
      */
     handle(error, context = {}) {
-        const errorType = error.constructor.name;
-        const handler = this.handlers.get(errorType) || this.handlers.get('default');
-        
-        if (this.logger) {
-            this.logger({
-                error: {
-                    name: error.name,
-                    message: error.message,
-                    stack: error.stack,
-                    type: errorType
-                },
-                context,
-                timestamp: new Date().toISOString()
-            });
-        }
-        
-        if (handler) {
-            return handler(error, context);
-        }
-        
-        console.error('Unhandled error:', error, context);
+        const errorType = error.type || error.constructor.name;
+        const handler = this.handlers.get(errorType) || this.handlers.get("default");
+
+        const payload = {
+            error: this.formatError(error),
+            context,
+            timestamp: new Date().toISOString()
+        };
+
+        // Notify observers
+        this.subscribers.forEach(sub => sub(payload));
+
+        // Log error
+        if (this.logger) this.logger(payload);
+
+        // Run handler
+        if (handler) return handler(error, context);
+
+        // Fallback
+        if (this.globalFallback) return this.globalFallback(error, context);
+
+        // Default: print to console
+        console.error("Unhandled error:", error);
         return null;
     }
-    
+
     /**
-     * Wrap a function with error handling
-     * @param {Function} fn - Function to wrap
-     * @param {Object} context - Error context
-     * @returns {Function} - Wrapped function
+     * Format error object in clean JSON
+     */
+    formatError(error) {
+        return {
+            name: error.name,
+            type: error.type || error.constructor.name,
+            message: error.message,
+            stack: error.stack,
+            context: error.context || null,
+            cause: error.originalError || null,
+            timestamp: error.timestamp || new Date().toISOString()
+        };
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                               FUNCTION WRAPPERS                             */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * Wrap async or sync functions with error handling
+     * @param {Function} fn
+     * @param {Object} context
+     * @returns {Function}
      */
     wrap(fn, context = {}) {
-        return async (...args) => {
+        return (...args) => {
             try {
-                return await fn(...args);
+                const result = fn(...args);
+                // Handle async functions
+                if (result instanceof Promise) {
+                    return result.catch(err =>
+                        this.handle(err, { ...context, args })
+                    );
+                }
+                return result;
             } catch (error) {
                 return this.handle(error, { ...context, args });
             }
         };
     }
-    
-    /**
-     * Create error with context
-     * @param {string} message - Error message
-     * @param {Object} context - Error context
-     * @param {Error} originalError - Original error
-     * @returns {Error} - Enhanced error
-     */
-    createError(message, context = {}, originalError = null) {
+
+    /* -------------------------------------------------------------------------- */
+    /*                              CUSTOM ERROR TYPES                             */
+    /* -------------------------------------------------------------------------- */
+
+    createError(message, context = {}, original = null, type = "GeneralError") {
         const error = new Error(message);
+        error.type = type;
         error.context = context;
-        error.originalError = originalError;
+        error.originalError = original;
         error.timestamp = new Date().toISOString();
         return error;
     }
-    
+
+    /* -------------------------------------------------------------------------- */
+    /*                         RETRY WITH EXPONENTIAL BACKOFF                      */
+    /* -------------------------------------------------------------------------- */
+
     /**
-     * Retry a function with error handling
-     * @param {Function} fn - Function to retry
-     * @param {number} maxRetries - Maximum number of retries
-     * @param {number} delay - Delay between retries in milliseconds
-     * @returns {Promise} - Promise that resolves with function result
+     * Retry function with exponential backoff
+     * @param {Function} fn - must return a Promise
+     * @param {number} retries
+     * @param {number} delay
      */
-    async retry(fn, maxRetries = 3, delay = 1000) {
+    async retry(fn, retries = 3, delay = 500) {
         let lastError;
-        
-        for (let i = 0; i < maxRetries; i++) {
+
+        for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 return await fn();
-            } catch (error) {
-                lastError = error;
-                if (i < maxRetries - 1) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
+            } catch (err) {
+                lastError = err;
+
+                if (attempt < retries) {
+                    const backoff = delay * Math.pow(2, attempt - 1);
+                    await new Promise(res => setTimeout(res, backoff));
                 }
             }
         }
-        
+
         throw lastError;
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                               ERROR DEDUPLICATION                           */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * Prevent same error from spamming logs (optional)
+     * @param {number} windowMs
+     */
+    enableDeduplication(windowMs = 5000) {
+        this.lastErrorHash = null;
+        this.lastTimestamp = 0;
+
+        this.setLogger((payload) => {
+            const hash = JSON.stringify(payload.error);
+            const now = Date.now();
+
+            if (hash === this.lastErrorHash && now - this.lastTimestamp < windowMs)
+                return; // Skip duplicate
+
+            this.lastErrorHash = hash;
+            this.lastTimestamp = now;
+
+            console.error(payload);
+        });
     }
 }
 
-// Global error handler instance
-export const errorHandler = new ErrorHandler();
+/* -------------------------------------------------------------------------- */
+/*                        EXPORT SINGLETON INSTANCE                           */
+/* -------------------------------------------------------------------------- */
+
+export const errorHandler = new EnhancedErrorHandler();
