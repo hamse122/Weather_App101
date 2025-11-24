@@ -1,108 +1,135 @@
 /**
  * Circuit Breaker Utility
- * Circuit breaker pattern for preventing cascading failures
+ * Protects async functions from cascading failures
  */
 
-/**
- * CircuitBreaker class for implementing circuit breaker pattern
- */
 export class CircuitBreaker {
     constructor(fn, options = {}) {
+        if (typeof fn !== "function") {
+            throw new Error("CircuitBreaker requires a function");
+        }
+
         this.fn = fn;
-        this.threshold = options.threshold || 5;
-        this.timeout = options.timeout || 60000;
-        this.resetTimeout = options.resetTimeout || 30000;
-        
+
+        // Configurable settings
+        this.threshold = options.threshold ?? 5;        // failures before OPEN
+        this.timeout = options.timeout ?? 60000;        // execution timeout
+        this.resetTimeout = options.resetTimeout ?? 30000; // cooldown period
+        this.fallback = options.fallback ?? null;       // optional fallback
+
+        // internal state
         this.failureCount = 0;
-        this.state = 'CLOSED';
-        this.nextAttempt = Date.now();
         this.successCount = 0;
+        this.state = "CLOSED";
+        this.nextAttempt = Date.now();
     }
-    
+
     /**
-     * Execute the function with circuit breaker
-     * @param {...any} args - Function arguments
-     * @returns {Promise} - Promise that resolves with function result
+     * Execute function with circuit breaker protection
      */
     async execute(...args) {
-        if (this.state === 'OPEN') {
+        if (this.state === "OPEN") {
             if (Date.now() < this.nextAttempt) {
-                throw new Error('Circuit breaker is OPEN');
+                if (this.fallback) return this.fallback(...args);
+                throw new Error("CircuitBreaker: OPEN (cooldown active)");
             }
-            this.state = 'HALF_OPEN';
+            // Trial execution
+            this.state = "HALF_OPEN";
             this.successCount = 0;
         }
-        
+
         try {
             const result = await Promise.race([
                 this.fn(...args),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), this.timeout))
+                this._timeoutReject(this.timeout)
             ]);
-            
-            this.onSuccess();
+
+            this._handleSuccess();
             return result;
+
         } catch (error) {
-            this.onFailure();
+            this._handleFailure(error);
+            if (this.fallback) return this.fallback(...args);
             throw error;
         }
     }
-    
+
     /**
-     * Handle successful execution
+     * Reject after the given timeout
      */
-    onSuccess() {
+    _timeoutReject(ms) {
+        return new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("CircuitBreaker: TIMEOUT")), ms)
+        );
+    }
+
+    /**
+     * Success handler
+     */
+    _handleSuccess() {
         this.failureCount = 0;
-        
-        if (this.state === 'HALF_OPEN') {
+
+        if (this.state === "HALF_OPEN") {
             this.successCount++;
             if (this.successCount >= this.threshold) {
-                this.state = 'CLOSED';
+                this.state = "CLOSED";
                 this.successCount = 0;
             }
         }
     }
-    
+
     /**
-     * Handle failed execution
+     * Failure handler
      */
-    onFailure() {
+    _handleFailure(error) {
         this.failureCount++;
-        
+
         if (this.failureCount >= this.threshold) {
-            this.state = 'OPEN';
+            this.state = "OPEN";
             this.nextAttempt = Date.now() + this.resetTimeout;
         }
     }
-    
+
     /**
      * Get current state
-     * @returns {Object} - Current state information
      */
     getState() {
         return {
             state: this.state,
-            failureCount: this.failureCount,
-            successCount: this.successCount,
+            failures: this.failureCount,
+            successes: this.successCount,
             nextAttempt: this.nextAttempt
         };
     }
-    
+
     /**
-     * Reset circuit breaker
+     * Reset to safe state
      */
     reset() {
-        this.state = 'CLOSED';
+        this.state = "CLOSED";
         this.failureCount = 0;
         this.successCount = 0;
         this.nextAttempt = Date.now();
     }
+
+    /**
+     * Force OPEN (manual override)
+     */
+    forceOpen() {
+        this.state = "OPEN";
+        this.nextAttempt = Date.now() + this.resetTimeout;
+    }
+
+    /**
+     * Force CLOSED (manual override)
+     */
+    forceClose() {
+        this.reset();
+    }
 }
 
 /**
- * Create a circuit breaker for a function
- * @param {Function} fn - Function to protect
- * @param {Object} options - Circuit breaker options
- * @returns {CircuitBreaker} - Circuit breaker instance
+ * Factory function
  */
 export function createCircuitBreaker(fn, options = {}) {
     return new CircuitBreaker(fn, options);
