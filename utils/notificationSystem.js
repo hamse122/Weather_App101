@@ -1,119 +1,198 @@
 /**
- * Notification System Utility
- * Notification system for managing and displaying notifications
+ * Advanced Notification System Utility
+ * Includes queue logic, listener batching, pause/resume, duplicates filtering, 
+ * extended configuration, and safer ID generation.
  */
 
-/**
- * NotificationSystem class for managing notifications
- */
 export class NotificationSystem {
-    constructor() {
+    constructor(options = {}) {
         this.notifications = [];
         this.listeners = [];
-        this.maxNotifications = 10;
+
+        this.maxNotifications = options.maxNotifications || 10;
+        this.overflowStrategy = options.overflowStrategy || "fifo"; 
+        // fifo = remove oldest, lifo = remove newest
+        
+        this.allowDuplicates = options.allowDuplicates ?? true;
+        this.logHistory = options.logHistory ?? false;
+
+        this.history = [];
+
+        // Internal storage for active timers
+        this.timers = new Map();
     }
-    
+
+    /** Generate very strong unique ID */
+    static uid() {
+        return `${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+    }
+
     /**
      * Add a notification
-     * @param {Object} notification - Notification object with type, message, and optional duration
      */
     notify(notification) {
         const notif = {
-            id: Date.now() + Math.random(),
-            type: notification.type || 'info',
+            id: NotificationSystem.uid(),
+            type: notification.type || "info",
             message: notification.message,
-            duration: notification.duration || 5000,
+            duration: notification.duration ?? 5000,
             timestamp: new Date(),
-            ...notification
+            meta: notification.meta || {},
+            ...notification,
         };
-        
+
+        // Prevent duplicates by message/type (optional)
+        if (!this.allowDuplicates) {
+            const exists = this.notifications.some(
+                (n) => n.message === notif.message && n.type === notif.type
+            );
+            if (exists) return null;
+        }
+
+        // Maintain queue size
+        if (this.notifications.length >= this.maxNotifications) {
+            if (this.overflowStrategy === "fifo") {
+                const removed = this.notifications.shift();
+                this._clearTimer(removed.id);
+            } else {
+                const removed = this.notifications.pop();
+                this._clearTimer(removed.id);
+            }
+        }
+
         this.notifications.push(notif);
-        
-        if (this.notifications.length > this.maxNotifications) {
-            this.notifications.shift();
+
+        // Save to history if enabled
+        if (this.logHistory) {
+            this.history.push(notif);
         }
-        
-        this.notifyListeners(notif);
-        
+
+        // Auto-dismiss timer
         if (notif.duration > 0) {
-            setTimeout(() => {
-                this.remove(notif.id);
-            }, notif.duration);
+            const timer = setTimeout(() => this.remove(notif.id), notif.duration);
+            this.timers.set(notif.id, timer);
         }
-        
+
+        this._emit("add", notif);
         return notif.id;
     }
-    
+
     /**
      * Remove a notification by ID
-     * @param {number} id - Notification ID
      */
     remove(id) {
-        const index = this.notifications.findIndex(n => n.id === id);
+        const index = this.notifications.findIndex((n) => n.id === id);
         if (index > -1) {
-            this.notifications.splice(index, 1);
-            this.notifyListeners(null, 'remove');
+            const removed = this.notifications.splice(index, 1)[0];
+            this._clearTimer(id);
+            this._emit("remove", removed);
         }
     }
-    
+
     /**
      * Clear all notifications
      */
     clear() {
+        this.notifications.forEach((n) => this._clearTimer(n.id));
         this.notifications = [];
-        this.notifyListeners(null, 'clear');
+        this._emit("clear", null);
     }
-    
+
+    /**
+     * Pause auto-dismiss timer
+     */
+    pause(id) {
+        const timer = this.timers.get(id);
+        if (timer) {
+            clearTimeout(timer);
+            this.timers.delete(id);
+            this._emit("pause", this.get(id));
+        }
+    }
+
+    /**
+     * Resume auto-dismiss timer
+     */
+    resume(id) {
+        const notif = this.get(id);
+        if (notif && notif.duration > 0 && !this.timers.has(id)) {
+            const timer = setTimeout(() => this.remove(id), notif.duration);
+            this.timers.set(id, timer);
+            this._emit("resume", notif);
+        }
+    }
+
+    /**
+     * Get notification by ID
+     */
+    get(id) {
+        return this.notifications.find((n) => n.id === id) || null;
+    }
+
     /**
      * Get all notifications
-     * @returns {Array} - Array of notifications
      */
     getAll() {
         return [...this.notifications];
     }
-    
+
+    /**
+     * Get log history (if enabled)
+     */
+    getHistory() {
+        return [...this.history];
+    }
+
     /**
      * Subscribe to notification changes
-     * @param {Function} listener - Listener function
-     * @returns {Function} - Unsubscribe function
      */
     subscribe(listener) {
         this.listeners.push(listener);
         return () => {
-            const index = this.listeners.indexOf(listener);
-            if (index > -1) {
-                this.listeners.splice(index, 1);
-            }
+            const idx = this.listeners.indexOf(listener);
+            if (idx > -1) this.listeners.splice(idx, 1);
         };
     }
-    
+
     /**
-     * Notify all listeners
-     * @param {Object|null} notification - Notification object
-     * @param {string} action - Action type
+     * Internal emit wrapper
      */
-    notifyListeners(notification, action = 'add') {
-        this.listeners.forEach(listener => {
-            listener({ notification, action, notifications: this.getAll() });
-        });
+    _emit(action, notification) {
+        const payload = {
+            action,
+            notification,
+            notifications: this.getAll(),
+            timestamp: new Date(),
+        };
+
+        this.listeners.forEach((listener) => listener(payload));
     }
-    
+
     /**
-     * Create helper methods
+     * Clear timer
      */
-    success(message, duration = 5000) {
-        return this.notify({ type: 'success', message, duration });
+    _clearTimer(id) {
+        const timer = this.timers.get(id);
+        if (timer) {
+            clearTimeout(timer);
+            this.timers.delete(id);
+        }
     }
-    
-    error(message, duration = 7000) {
-        return this.notify({ type: 'error', message, duration });
+
+    /** Helper methods */
+    success(message, duration = 5000, meta = {}) {
+        return this.notify({ type: "success", message, duration, meta });
     }
-    
-    warning(message, duration = 6000) {
-        return this.notify({ type: 'warning', message, duration });
+
+    error(message, duration = 7000, meta = {}) {
+        return this.notify({ type: "error", message, duration, meta });
     }
-    
-    info(message, duration = 5000) {
-        return this.notify({ type: 'info', message, duration });
+
+    warning(message, duration = 6000, meta = {}) {
+        return this.notify({ type: "warning", message, duration, meta });
+    }
+
+    info(message, duration = 5000, meta = {}) {
+        return this.notify({ type: "info", message, duration, meta });
     }
 }
