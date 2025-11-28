@@ -1,62 +1,168 @@
 /**
- * Rate Limiter Utility
- * Rate limiting system for controlling request frequency
+ * Advanced Rate Limiter
+ * Supports Token Bucket, Fixed Window, Sliding Window, and Redis-based distributed limits
  */
 
-/**
- * RateLimiter class for managing rate limits
- */
 export class RateLimiter {
-    constructor(maxRequests, timeWindow) {
+    /**
+     * @param {Object} options
+     * @param {number} options.maxRequests - Maximum number of requests
+     * @param {number} options.timeWindow - Time window in ms
+     * @param {"fixed"|"sliding"|"token"} [options.strategy="token"]
+     * @param {Object|null} [options.storage=null] - Optional storage adapter (Redis)
+     * @param {function} [options.logger=console] - Logging function
+     */
+    constructor({ maxRequests, timeWindow, strategy = "token", storage = null, logger = console }) {
         this.maxRequests = maxRequests;
         this.timeWindow = timeWindow;
-        this.requests = new Map();
+        this.strategy = strategy;
+        this.logger = logger;
+        this.storage = storage;
+
+        // Memory store fallback
+        this.memory = new Map();
     }
-    
+
     /**
-     * Check if a request is allowed
-     * @param {string} key - Unique identifier for the requester
-     * @returns {Object} - Object with allowed status, remaining requests, and reset time
+     * Fetch existing bucket or create a fresh one
      */
-    check(key) {
-        const now = Date.now();
-        const userRequests = this.requests.get(key) || [];
-        
-        // Clean old requests
-        const recentRequests = userRequests.filter(time => now - time < this.timeWindow);
-        
-        if (recentRequests.length >= this.maxRequests) {
-            return {
-                allowed: false,
-                remaining: 0,
-                resetTime: recentRequests[0] + this.timeWindow
-            };
+    async _getBucket(key) {
+        if (this.storage) {
+            const raw = await this.storage.get(`ratelimit:${key}`);
+            if (raw) return JSON.parse(raw);
         }
-        
-        recentRequests.push(now);
-        this.requests.set(key, recentRequests);
-        
-        return {
-            allowed: true,
-            remaining: this.maxRequests - recentRequests.length,
-            resetTime: now + this.timeWindow
+
+        return this.memory.get(key) || {
+            tokens: this.maxRequests,
+            lastRefill: Date.now(),
+            requestTimestamps: [] // For sliding window
         };
     }
-    
+
     /**
-     * Clean up old requests from memory
+     * Persist bucket to storage or memory
+     */
+    async _saveBucket(key, bucket) {
+        if (this.storage) {
+            await this.storage.set(`ratelimit:${key}`, JSON.stringify(bucket), "PX", this.timeWindow);
+            return;
+        }
+        this.memory.set(key, bucket);
+    }
+
+    /**
+     * Token bucket logic
+     */
+    _applyTokenBucket(bucket) {
+        const now = Date.now();
+        const refillRate = this.maxRequests / this.timeWindow;
+        const elapsed = now - bucket.lastRefill;
+
+        bucket.tokens = Math.min(
+            this.maxRequests,
+            bucket.tokens + elapsed * refillRate
+        );
+        bucket.lastRefill = now;
+
+        if (bucket.tokens >= 1) {
+            bucket.tokens -= 1;
+            return { allowed: true, remaining: Math.floor(bucket.tokens), resetTime: now + this.timeWindow };
+        }
+
+        const waitTime = (1 - bucket.tokens) / refillRate;
+        return { allowed: false, remaining: 0, resetTime: now + waitTime };
+    }
+
+    /**
+     * Fixed window logic
+     */
+    _applyFixedWindow(bucket) {
+        const now = Date.now();
+
+        if (!bucket.windowStart || now - bucket.windowStart >= this.timeWindow) {
+            bucket.windowStart = now;
+            bucket.count = 0;
+        }
+
+        if (bucket.count < this.maxRequests) {
+            bucket.count++;
+            return {
+                allowed: true,
+                remaining: this.maxRequests - bucket.count,
+                resetTime: bucket.windowStart + this.timeWindow
+            };
+        }
+
+        return {
+            allowed: false,
+            remaining: 0,
+            resetTime: bucket.windowStart + this.timeWindow
+        };
+    }
+
+    /**
+     * Sliding window logic
+     */
+    _applySlidingWindow(bucket) {
+        const now = Date.now();
+        bucket.requestTimestamps = bucket.requestTimestamps.filter(ts => now - ts < this.timeWindow);
+
+        if (bucket.requestTimestamps.length < this.maxRequests) {
+            bucket.requestTimestamps.push(now);
+            return {
+                allowed: true,
+                remaining: this.maxRequests - bucket.requestTimestamps.length,
+                resetTime: now + this.timeWindow
+            };
+        }
+
+        return {
+            allowed: false,
+            remaining: 0,
+            resetTime: bucket.requestTimestamps[0] + this.timeWindow
+        };
+    }
+
+    /**
+     * Main check method
+     * @param {string} key
+     * @returns {Promise<Object>}
+     */
+    async check(key) {
+        let bucket = await this._getBucket(key);
+
+        let result;
+        switch (this.strategy) {
+            case "fixed":
+                result = this._applyFixedWindow(bucket);
+                break;
+
+            case "sliding":
+                result = this._applySlidingWindow(bucket);
+                break;
+
+            case "token":
+            default:
+                result = this._applyTokenBucket(bucket);
+                break;
+        }
+
+        await this._saveBucket(key, bucket);
+        return result;
+    }
+
+    /**
+     * Manual memory cleanup (redis auto-cleans)
      */
     cleanup() {
         const now = Date.now();
-        for (const [key, requests] of this.requests) {
-            const recentRequests = requests.filter(time => now - time < this.timeWindow);
-            if (recentRequests.length === 0) {
-                this.requests.delete(key);
-            } else {
-                this.requests.set(key, recentRequests);
+        for (const [key, bucket] of this.memory) {
+            if (
+                (bucket.lastRefill && now - bucket.lastRefill > this.timeWindow * 2) ||
+                (bucket.windowStart && now - bucket.windowStart > this.timeWindow * 2)
+            ) {
+                this.memory.delete(key);
             }
         }
     }
 }
-
-
