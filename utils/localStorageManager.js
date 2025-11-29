@@ -1,39 +1,32 @@
 /**
- * LocalStorage Manager
- * Provides a safe and convenient interface for localStorage operations
+ * LocalStorage Manager (Advanced)
+ * Safe, structured, and feature-rich wrapper for localStorage
  */
 
+const STORAGE_PREFIX = "app_";  // Namespace prefix
+
 /**
- * Get an item from localStorage with automatic JSON parsing
- * @param {string} key - The key to retrieve
- * @param {*} defaultValue - Default value if key doesn't exist
- * @returns {*} - The stored value or defaultValue
+ * Build namespaced key
+ * @param {string} key
  */
-export function getItem(key, defaultValue = null) {
-  try {
-    const item = localStorage.getItem(key);
-    if (item === null) return defaultValue;
-    try {
-      return JSON.parse(item);
-    } catch {
-      return item;
-    }
-  } catch (error) {
-    console.error(`Error getting item ${key}:`, error);
-    return defaultValue;
-  }
+function buildKey(key) {
+  return `${STORAGE_PREFIX}${key}`;
 }
 
 /**
- * Set an item in localStorage with automatic JSON stringification
- * @param {string} key - The key to set
- * @param {*} value - The value to store
- * @returns {boolean} - True if successful, false otherwise
+ * Set item with optional TTL (in milliseconds)
+ * @param {string} key
+ * @param {*} value
+ * @param {number|null} ttl - Time to live (ms)
  */
-export function setItem(key, value) {
+export function setItem(key, value, ttl = null) {
   try {
-    const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-    localStorage.setItem(key, stringValue);
+    const data = {
+      value,
+      expiresAt: ttl ? Date.now() + ttl : null
+    };
+
+    localStorage.setItem(buildKey(key), JSON.stringify(data));
     return true;
   } catch (error) {
     console.error(`Error setting item ${key}:`, error);
@@ -42,13 +35,37 @@ export function setItem(key, value) {
 }
 
 /**
- * Remove an item from localStorage
- * @param {string} key - The key to remove
- * @returns {boolean} - True if successful, false otherwise
+ * Get item with TTL auto-expire support
+ * @param {string} key
+ * @param {*} defaultValue
+ */
+export function getItem(key, defaultValue = null) {
+  try {
+    const raw = localStorage.getItem(buildKey(key));
+    if (!raw) return defaultValue;
+
+    const parsed = JSON.parse(raw);
+
+    // Check TTL expiration
+    if (parsed.expiresAt && Date.now() > parsed.expiresAt) {
+      removeItem(key);
+      return defaultValue;
+    }
+
+    return parsed.value;
+  } catch (error) {
+    console.error(`Error getting item ${key}:`, error);
+    return defaultValue;
+  }
+}
+
+/**
+ * Remove an item
+ * @param {string} key
  */
 export function removeItem(key) {
   try {
-    localStorage.removeItem(key);
+    localStorage.removeItem(buildKey(key));
     return true;
   } catch (error) {
     console.error(`Error removing item ${key}:`, error);
@@ -57,29 +74,83 @@ export function removeItem(key) {
 }
 
 /**
- * Clear all items from localStorage
- * @returns {boolean} - True if successful, false otherwise
+ * Clear all keys under this namespace only
  */
 export function clear() {
   try {
-    localStorage.clear();
+    Object.keys(localStorage).forEach((key) => {
+      if (key.startsWith(STORAGE_PREFIX)) localStorage.removeItem(key);
+    });
     return true;
   } catch (error) {
-    console.error('Error clearing localStorage:', error);
+    console.error("Error clearing localStorage:", error);
     return false;
   }
 }
 
 /**
- * Get all keys from localStorage
- * @returns {string[]} - Array of all keys
+ * Check if a key exists
+ * @param {string} key
+ */
+export function hasKey(key) {
+  return localStorage.getItem(buildKey(key)) !== null;
+}
+
+/**
+ * Get all namespaced keys
  */
 export function getAllKeys() {
   try {
-    return Object.keys(localStorage);
+    return Object.keys(localStorage).filter((key) =>
+      key.startsWith(STORAGE_PREFIX)
+    );
   } catch (error) {
-    console.error('Error getting all keys:', error);
+    console.error("Error getting all keys:", error);
     return [];
   }
 }
 
+/**
+ * Get estimated storage usage (bytes)
+ */
+export function getStorageSize() {
+  try {
+    let total = 0;
+    for (let key in localStorage) {
+      const value = localStorage.getItem(key);
+      total += key.length + (value ? value.length : 0);
+    }
+    return total;
+  } catch (error) {
+    console.error("Error calculating storage size:", error);
+    return 0;
+  }
+}
+
+/**
+ * Export all stored data as object
+ */
+export function exportData() {
+  const result = {};
+  getAllKeys().forEach((key) => {
+    const pureKey = key.replace(STORAGE_PREFIX, "");
+    result[pureKey] = getItem(pureKey);
+  });
+  return result;
+}
+
+/**
+ * Import data object (bulk insert)
+ * @param {Object} obj
+ */
+export function importData(obj) {
+  try {
+    Object.entries(obj).forEach(([key, value]) => {
+      setItem(key, value);
+    });
+    return true;
+  } catch (error) {
+    console.error("Error importing data:", error);
+    return false;
+  }
+}
