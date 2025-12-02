@@ -1,159 +1,178 @@
 /**
  * Compression Utility
- * Text compression and decompression utilities
+ * Text compression and decompression utilities (RLE, Gzip, JSON)
  */
 
-/**
- * Compression class for compressing and decompressing text
- */
 export class Compression {
+
+    /* -------------------------------------------------------
+       SIMPLE RLE (Run-Length Encoding)
+    -------------------------------------------------------- */
+
     /**
      * Compress string using simple RLE (Run-Length Encoding)
-     * @param {string} str - String to compress
-     * @returns {string} - Compressed string
+     * @param {string} str
+     * @returns {string}
      */
-    static compressRLE(str) {
-        let compressed = '';
+    static compressRLE(str = "") {
+        if (typeof str !== "string") return "";
+
+        let compressed = "";
         let count = 1;
-        
+
         for (let i = 0; i < str.length; i++) {
             if (str[i] === str[i + 1]) {
                 count++;
             } else {
-                if (count > 3) {
-                    compressed += count + str[i];
-                } else {
-                    compressed += str[i].repeat(count);
-                }
+                compressed += (count > 3) ? count + str[i] : str[i].repeat(count);
                 count = 1;
             }
         }
-        
+
         return compressed;
     }
-    
+
     /**
      * Decompress RLE compressed string
-     * @param {string} compressed - Compressed string
-     * @returns {string} - Decompressed string
+     * @param {string} compressed
+     * @returns {string}
      */
-    static decompressRLE(compressed) {
-        let decompressed = '';
+    static decompressRLE(compressed = "") {
+        let output = "";
         let i = 0;
-        
+
         while (i < compressed.length) {
+            // If digits → extract full number
             if (/\d/.test(compressed[i])) {
-                let count = '';
+                let count = "";
                 while (/\d/.test(compressed[i])) {
                     count += compressed[i];
                     i++;
                 }
-                decompressed += compressed[i].repeat(parseInt(count, 10));
-                decompressed += compressed[i].repeat(parseInt(count));
+
+                const char = compressed[i];
+                output += char.repeat(parseInt(count, 10));
             } else {
-                decompressed += compressed[i];
+                // No number → literal char
+                output += compressed[i];
             }
             i++;
         }
-        
-        return decompressed;
+
+        return output;
     }
-    
+
+    /* -------------------------------------------------------
+       JSON COMPRESSION
+    -------------------------------------------------------- */
+
     /**
      * Compress JSON by removing whitespace
-     * @param {Object} obj - Object to compress
-     * @returns {string} - Compressed JSON string
      */
     static compressJSON(obj) {
         return JSON.stringify(obj);
     }
-    
+
     /**
      * Decompress JSON
-     * @param {string} json - Compressed JSON string
-     * @returns {Object} - Decompressed object
      */
     static decompressJSON(json) {
-        return JSON.parse(json);
+        try {
+            return JSON.parse(json);
+        } catch {
+            throw new Error("Invalid JSON input");
+        }
     }
-    
+
+    /* -------------------------------------------------------
+       GZIP COMPRESSION (Browser CompressionStream API)
+    -------------------------------------------------------- */
+
     /**
-     * Gzip compress (using browser CompressionStream if available)
-     * @param {string} str - String to compress
-     * @returns {Promise<Uint8Array>} - Compressed data
+     * Gzip compress text
+     * @param {string} str
+     * @returns {Promise<Uint8Array>}
      */
-    static async compressGzip(str) {
-        if (typeof CompressionStream !== 'undefined') {
-            const stream = new CompressionStream('gzip');
+    static async compressGzip(str = "") {
+        const encoder = new TextEncoder();
+
+        if (typeof CompressionStream !== "undefined") {
+            const stream = new CompressionStream("gzip");
             const writer = stream.writable.getWriter();
             const reader = stream.readable.getReader();
-            
-            const encoder = new TextEncoder();
+
             writer.write(encoder.encode(str));
             writer.close();
-            
+
             const chunks = [];
             let done = false;
-            
+
             while (!done) {
-                const { value, done: readerDone } = await reader.read();
-                done = readerDone;
+                const { value, done: rDone } = await reader.read();
+                done = rDone;
                 if (value) chunks.push(value);
             }
-            
-            const compressed = new Uint8Array(chunks.reduce((acc, chunk) => acc + chunk.length, 0));
-            let offset = 0;
-            chunks.forEach(chunk => {
-                compressed.set(chunk, offset);
-                offset += chunk.length;
-            });
-            
-            return compressed;
+
+            return this.#mergeUint8Arrays(chunks);
         }
-        
-        // Fallback to simple compression
-        return new TextEncoder().encode(this.compressRLE(str));
+
+        // Fallback to simple RLE
+        return encoder.encode(this.compressRLE(str));
     }
-    
+
     /**
-     * Gzip decompress (using browser DecompressionStream if available)
-     * @param {Uint8Array} data - Compressed data
-     * @returns {Promise<string>} - Decompressed string
+     * Gzip decompress
+     * @param {Uint8Array} data
+     * @returns {Promise<string>}
      */
     static async decompressGzip(data) {
-        if (typeof DecompressionStream !== 'undefined') {
-            const stream = new DecompressionStream('gzip');
+        const decoder = new TextDecoder();
+
+        if (typeof DecompressionStream !== "undefined") {
+            const stream = new DecompressionStream("gzip");
             const writer = stream.writable.getWriter();
             const reader = stream.readable.getReader();
-            
+
             writer.write(data);
             writer.close();
-            
+
             const chunks = [];
             let done = false;
-            
+
             while (!done) {
-                const { value, done: readerDone } = await reader.read();
-                done = readerDone;
+                const { value, done: rDone } = await reader.read();
+                done = rDone;
                 if (value) chunks.push(value);
             }
-            
-            const decompressed = new Uint8Array(chunks.reduce((acc, chunk) => acc + chunk.length, 0));
-            let offset = 0;
-            chunks.forEach(chunk => {
-                decompressed.set(chunk, offset);
-                offset += chunk.length;
-            });
-            
-            return new TextDecoder().decode(decompressed);
+
+            const output = this.#mergeUint8Arrays(chunks);
+            return decoder.decode(output);
         }
-        
-        return this.decompressRLE(new TextDecoder().decode(data));
+
+        // Fallback to RLE
+        return this.decompressRLE(decoder.decode(data));
+    }
+
+    /* -------------------------------------------------------
+       PRIVATE UTILS
+    -------------------------------------------------------- */
+
+    /**
+     * Merge multiple Uint8Array chunks into one
+     * @param {Uint8Array[]} chunks
+     * @returns {Uint8Array}
+     * @private
+     */
+    static #mergeUint8Arrays(chunks) {
+        const total = chunks.reduce((acc, c) => acc + c.length, 0);
+        const merged = new Uint8Array(total);
+
+        let offset = 0;
+        for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        return merged;
     }
 }
-        // Fallback to simple decompression
-        return this.decompressRLE(new TextDecoder().decode(data));
-    }
-}
-
-
