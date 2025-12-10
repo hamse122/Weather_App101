@@ -1,124 +1,217 @@
 /**
- * Serialization Utility
- * Object serialization utilities for converting objects to various formats
+ * Advanced Serialization Utility
+ * Enhanced object → string / binary serializers
+ * Supports: circular refs, types, Maps, Sets, Date, RegExp, BigInt
  */
 
-/**
- * Serialization class for serializing objects
- */
 export class Serialization {
-    /**
-     * Serialize object to JSON string
-     * @param {Object} obj - Object to serialize
-     * @param {number} indent - JSON indentation
-     * @returns {string} - JSON string
-     */
+    /********************************************************************
+     * JSON SERIALIZATION
+     ********************************************************************/
+    
     static toJSON(obj, indent = 2) {
         try {
             return JSON.stringify(obj, null, indent);
-        } catch (error) {
-            throw new Error(`Serialization failed: ${error.message}`);
+        } catch (err) {
+            throw new Error(`JSON serialization failed: ${err.message}`);
         }
     }
+
+    static fromJSON(json) {
+        try {
+            return JSON.parse(json);
+        } catch (err) {
+            throw new Error(`JSON parse failed: ${err.message}`);
+        }
+    }
+
+    /********************************************************************
+     * QUERY STRING
+     ********************************************************************/
     
-    /**
-     * Serialize object to query string
-     * @param {Object} obj - Object to serialize
-     * @returns {string} - Query string
-     */
     static toQueryString(obj) {
         const params = new URLSearchParams();
-        Object.entries(obj).forEach(([key, value]) => {
+
+        const build = (prefix, value) => {
+            if (value === undefined || value === null) return;
+
             if (Array.isArray(value)) {
-                value.forEach(v => params.append(key, v));
-            } else if (value !== null && value !== undefined) {
-                params.append(key, value);
+                value.forEach(v => build(prefix, v));
+            } else if (typeof value === "object") {
+                Object.entries(value).forEach(([k, v]) => {
+                    build(`${prefix}[${k}]`, v);
+                });
+            } else {
+                params.append(prefix, value);
             }
-        });
+        };
+
+        Object.entries(obj).forEach(([key, value]) => build(key, value));
         return params.toString();
     }
-    
-    /**
-     * Serialize object to form data
-     * @param {Object} obj - Object to serialize
-     * @returns {FormData} - FormData object
-     */
-    static toFormData(obj) {
-        const formData = new FormData();
-        Object.entries(obj).forEach(([key, value]) => {
-            if (value instanceof File || value instanceof Blob) {
-                formData.append(key, value);
-            } else if (Array.isArray(value)) {
-                value.forEach(v => formData.append(key, v));
-            } else if (value !== null && value !== undefined) {
-                formData.append(key, value);
+
+    static fromQueryString(str) {
+        const params = new URLSearchParams(str);
+        const result = {};
+
+        for (const [key, value] of params.entries()) {
+            if (key.includes("[")) {
+                // nested: user[name]
+                const keys = key.split(/[\[\]]/).filter(Boolean);
+                let current = result;
+
+                keys.forEach((k, i) => {
+                    if (i === keys.length - 1) {
+                        current[k] = value;
+                    } else {
+                        current[k] = current[k] || {};
+                        current = current[k];
+                    }
+                });
+            } else {
+                result[key] = value;
             }
-        });
-        return formData;
+        }
+        return result;
     }
-    
-    /**
-     * Serialize object with custom replacer
-     * @param {Object} obj - Object to serialize
-     * @param {Function} replacer - Replacer function
-     * @returns {string} - Serialized string
-     */
-    static serializeWithReplacer(obj, replacer) {
-        return JSON.stringify(obj, replacer);
+
+    /********************************************************************
+     * FORM DATA SERIALIZATION
+     ********************************************************************/
+
+    static toFormData(obj, form = new FormData(), prefix = "") {
+        for (const [key, value] of Object.entries(obj)) {
+            const fullKey = prefix ? `${prefix}[${key}]` : key;
+
+            if (value instanceof File || value instanceof Blob) {
+                form.append(fullKey, value);
+            } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+                this.toFormData(value, form, fullKey);
+            } else if (Array.isArray(value)) {
+                value.forEach(v => form.append(fullKey, v));
+            } else if (value !== undefined && value !== null) {
+                form.append(fullKey, value);
+            }
+        }
+        return form;
     }
-    
-    /**
-     * Deep clone object using serialization
-     * @param {Object} obj - Object to clone
-     * @returns {Object} - Cloned object
-     */
-    static deepClone(obj) {
-        return JSON.parse(JSON.stringify(obj));
-    }
-    
-    /**
-     * Serialize object to base64
-     * @param {Object} obj - Object to serialize
-     * @returns {string} - Base64 encoded string
-     */
+
+    /********************************************************************
+     * BASE64
+     ********************************************************************/
+
     static toBase64(obj) {
-        const json = JSON.stringify(obj);
-        return btoa(unescape(encodeURIComponent(json)));
+        const json = encodeURIComponent(JSON.stringify(obj));
+        return btoa(json);
     }
-    
-    /**
-     * Serialize with circular reference handling
-     * @param {Object} obj - Object to serialize
-     * @returns {string} - Serialized string
-     */
+
+    static fromBase64(str) {
+        try {
+            const json = decodeURIComponent(atob(str));
+            return JSON.parse(json);
+        } catch (err) {
+            throw new Error(`Invalid Base64: ${err.message}`);
+        }
+    }
+
+    /********************************************************************
+     * CIRCULAR-SAFE SERIALIZATION
+     ********************************************************************/
+
     static serializeCircular(obj) {
         const seen = new WeakSet();
         return JSON.stringify(obj, (key, value) => {
-            if (typeof value === 'object' && value !== null) {
-                if (seen.has(value)) {
-                    return '[Circular]';
-                }
+            if (typeof value === "object" && value !== null) {
+                if (seen.has(value)) return "[Circular]";
                 seen.add(value);
             }
             return value;
         });
     }
-    
-    /**
-     * Serialize object with type information
-     * @param {Object} obj - Object to serialize
-     * @returns {string} - Serialized string with type info
-     */
+
+    /********************************************************************
+     * DEEP CLONE (CIRCULAR-SAFE)
+     ********************************************************************/
+
+    static deepClone(obj) {
+        const seen = new WeakMap();
+
+        function clone(value) {
+            if (typeof value !== "object" || value === null) return value;
+
+            if (seen.has(value)) return seen.get(value);
+
+            let result;
+
+            if (Array.isArray(value)) {
+                result = [];
+                seen.set(value, result);
+                value.forEach((v, i) => (result[i] = clone(v)));
+                return result;
+            }
+
+            result = {};
+            seen.set(value, result);
+            for (const [k, v] of Object.entries(value)) {
+                result[k] = clone(v);
+            }
+            return result;
+        }
+
+        return clone(obj);
+    }
+
+    /********************************************************************
+     * TYPE-SAFE SERIALIZATION + DESERIALIZER
+     ********************************************************************/
+
     static serializeWithTypes(obj) {
+        const seen = new WeakSet();
         return JSON.stringify(obj, (key, value) => {
-            if (value === null) return { type: 'null', value: null };
-            if (value instanceof Date) return { type: 'Date', value: value.toISOString() };
-            if (value instanceof RegExp) return { type: 'RegExp', value: value.toString() };
-            if (typeof value === 'function') return { type: 'Function', value: value.toString() };
-            if (typeof value === 'undefined') return { type: 'undefined', value: null };
+            if (typeof value === "object" && value !== null) {
+                if (seen.has(value)) return "[Circular]";
+                seen.add(value);
+            }
+
+            if (value instanceof Date) return { __type: "Date", value: value.toISOString() };
+            if (value instanceof RegExp) return { __type: "RegExp", value: value.toString() };
+            if (value instanceof Map) return { __type: "Map", value: [...value] };
+            if (value instanceof Set) return { __type: "Set", value: [...value] };
+            if (typeof value === "bigint") return { __type: "BigInt", value: value.toString() };
+
             return value;
         });
     }
+
+    static deserializeWithTypes(json) {
+        return JSON.parse(json, (_, value) => {
+            if (!value || typeof value !== "object") return value;
+
+            if (value.__type === "Date") return new Date(value.value);
+            if (value.__type === "RegExp") return new RegExp(value.value.slice(1, -1));
+            if (value.__type === "Map") return new Map(value.value);
+            if (value.__type === "Set") return new Set(value.value);
+            if (value.__type === "BigInt") return BigInt(value.value);
+
+            return value;
+        });
+    }
+
+    /********************************************************************
+     * STABLE SERIALIZATION (DETERMINISTIC)
+     ********************************************************************/
+    static stableStringify(obj) {
+        return JSON.stringify(obj, Object.keys(obj).sort(), 2);
+    }
+
+    /********************************************************************
+     * CUSTOM REPLACER / REVIVER
+     ********************************************************************/
+    static serializeWithReplacer(obj, replacer) {
+        return JSON.stringify(obj, replacer);
+    }
+
+    static deserializeWithReviver(json, reviver) {
+        return JSON.parse(json, reviver);
+    }
 }
-
-
