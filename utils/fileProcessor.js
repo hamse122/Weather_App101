@@ -1,49 +1,67 @@
 /**
- * Advanced File Processing Utilities for Node.js
- * Provides safe, scalable, and feature-rich file operations.
+ * Advanced File Processing Utilities for Node.js (Upgraded)
+ * Safe, scalable, production-ready
  */
 
-const fs = require("fs").promises;
-const fss = require("fs"); // For streaming
+const fs = require("fs/promises");
+const fss = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { pipeline } = require("stream/promises");
+const os = require("os");
 
 class FileProcessor {
+
+    /* -------------------------------------------------------------------------- */
+    /*                               VALIDATION                                    */
+    /* -------------------------------------------------------------------------- */
+
+    static _validatePath(p) {
+        if (!p || typeof p !== "string") {
+            throw new TypeError("Invalid path provided");
+        }
+    }
+
     /* -------------------------------------------------------------------------- */
     /*                               DIRECTORY HELPERS                             */
     /* -------------------------------------------------------------------------- */
 
-    static async readDirectory(dirPath, recursive = false) {
-        try {
-            const items = await fs.readdir(dirPath, { withFileTypes: true });
-            const result = [];
+    static async readDirectory(dirPath, options = { recursive: false }) {
+        this._validatePath(dirPath);
 
-            for (const item of items) {
-                const fullPath = path.join(dirPath, item.name);
+        const results = [];
+        const entries = await fs.readdir(dirPath, { withFileTypes: true });
 
-                if (item.isDirectory()) {
-                    if (recursive) {
-                        const sub = await this.readDirectory(fullPath, true);
-                        result.push(...sub);
-                    }
-                } else if (item.isFile()) {
-                    result.push(fullPath);
-                }
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry.name);
+
+            if (entry.isDirectory() && options.recursive) {
+                results.push(...await this.readDirectory(fullPath, options));
+            } else if (entry.isFile()) {
+                results.push(fullPath);
             }
-
-            return result;
-        } catch (err) {
-            throw new Error(`Failed to read directory "${dirPath}": ${err.message}`);
         }
+        return results;
     }
 
-    static async findFilesByExtension(dirPath, extensions, recursive = false) {
-        extensions = extensions.map(e => e.toLowerCase());
-        const files = await this.readDirectory(dirPath, recursive);
+    static async ensureDirectory(dirPath) {
+        this._validatePath(dirPath);
+        await fs.mkdir(dirPath, { recursive: true });
+        return dirPath;
+    }
 
-        return files.filter(file => 
-            extensions.includes(path.extname(file).toLowerCase())
-        );
+    static async copyDirectory(src, dest) {
+        await this.ensureDirectory(dest);
+        const entries = await fs.readdir(src, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const srcPath = path.join(src, entry.name);
+            const destPath = path.join(dest, entry.name);
+
+            entry.isDirectory()
+                ? await this.copyDirectory(srcPath, destPath)
+                : await fs.copyFile(srcPath, destPath);
+        }
     }
 
     /* -------------------------------------------------------------------------- */
@@ -59,29 +77,21 @@ class FileProcessor {
         }
     }
 
-    static async ensureDirectory(dirPath) {
-        await fs.mkdir(dirPath, { recursive: true });
-        return dirPath;
-    }
-
     /* -------------------------------------------------------------------------- */
-    /*                                FILE METADATA                                */
+    /*                               FILE METADATA                                 */
     /* -------------------------------------------------------------------------- */
 
     static async getFileInfo(filePath) {
-        try {
-            const stat = await fs.stat(filePath);
-            return {
-                size: stat.size,
-                sizeFormatted: this.formatFileSize(stat.size),
-                modified: stat.mtime,
-                created: stat.birthtime,
-                isDirectory: stat.isDirectory(),
-                isFile: stat.isFile()
-            };
-        } catch (err) {
-            throw new Error(`Cannot get file info for "${filePath}": ${err.message}`);
-        }
+        const stat = await fs.stat(filePath);
+        return {
+            size: stat.size,
+            sizeFormatted: this.formatFileSize(stat.size),
+            created: stat.birthtime,
+            modified: stat.mtime,
+            permissions: stat.mode,
+            isFile: stat.isFile(),
+            isDirectory: stat.isDirectory()
+        };
     }
 
     static formatFileSize(bytes) {
@@ -95,108 +105,130 @@ class FileProcessor {
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                               BACKUP SYSTEM                                 */
+    /*                                SAFE WRITE                                   */
     /* -------------------------------------------------------------------------- */
 
-    static async createBackup(filePath) {
-        if (!(await this.fileExists(filePath))) {
-            throw new Error(`Cannot create backup: file "${filePath}" does not exist`);
-        }
+    static async writeTextAtomic(filePath, data) {
+        await this.ensureDirectory(path.dirname(filePath));
+        const temp = `${filePath}.${crypto.randomUUID()}.tmp`;
+        await fs.writeFile(temp, data, "utf8");
+        await fs.rename(temp, filePath);
+    }
 
-        let version = 1;
-        let backupPath = `${filePath}.backup`;
+    static async writeJSON(filePath, obj) {
+        return this.writeTextAtomic(filePath, JSON.stringify(obj, null, 2));
+    }
 
-        while (await this.fileExists(backupPath)) {
-            backupPath = `${filePath}.backup.${version++}`;
-        }
-
-        await fs.copyFile(filePath, backupPath);
-        return backupPath;
+    static async readJSON(filePath) {
+        return JSON.parse(await fs.readFile(filePath, "utf8"));
     }
 
     /* -------------------------------------------------------------------------- */
     /*                                COPY / MOVE                                  */
     /* -------------------------------------------------------------------------- */
 
-    static async copyFile(source, destination) {
-        await this.ensureDirectory(path.dirname(destination));
-        await fs.copyFile(source, destination);
-        return destination;
+    static async copyFile(src, dest) {
+        await this.ensureDirectory(path.dirname(dest));
+        await fs.copyFile(src, dest);
+        return dest;
     }
 
-    static async moveFile(source, destination) {
-        await this.ensureDirectory(path.dirname(destination));
-        await fs.rename(source, destination);
-        return destination;
-    }
-
-    /* -------------------------------------------------------------------------- */
-    /*                             READ / WRITE FILES                              */
-    /* -------------------------------------------------------------------------- */
-
-    static async readText(filePath) {
-        return fs.readFile(filePath, "utf-8");
-    }
-
-    static async writeText(filePath, data) {
-        await this.ensureDirectory(path.dirname(filePath));
-        return fs.writeFile(filePath, data, "utf-8");
-    }
-
-    static async writeJSON(filePath, obj) {
-        const json = JSON.stringify(obj, null, 4);
-        return this.writeText(filePath, json);
-    }
-
-    static async readJSON(filePath) {
-        const raw = await this.readText(filePath);
-        return JSON.parse(raw);
+    static async moveFile(src, dest) {
+        try {
+            await this.ensureDirectory(path.dirname(dest));
+            await fs.rename(src, dest);
+        } catch {
+            await this.copyFile(src, dest);
+            await fs.unlink(src);
+        }
+        return dest;
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                              STREAM OPERATIONS                               */
+    /*                               STREAM OPERATIONS                              */
     /* -------------------------------------------------------------------------- */
 
-    static async readLargeFile(filePath, onChunk, chunkSize = 64 * 1024) {
-        return new Promise((resolve, reject) => {
-            const stream = fss.createReadStream(filePath, { highWaterMark: chunkSize });
+    static async readLargeFile(filePath, onChunk) {
+        const stream = fss.createReadStream(filePath);
+        for await (const chunk of stream) {
+            onChunk(chunk);
+        }
+    }
 
-            stream.on("data", chunk => onChunk(chunk));
-            stream.on("end", resolve);
-            stream.on("error", err => reject(new Error(`Stream error: ${err.message}`)));
-        });
+    static async streamCopy(src, dest, onProgress) {
+        await this.ensureDirectory(path.dirname(dest));
+        const total = (await fs.stat(src)).size;
+        let transferred = 0;
+
+        await pipeline(
+            fss.createReadStream(src),
+            new (require("stream").Transform)({
+                transform(chunk, _, cb) {
+                    transferred += chunk.length;
+                    onProgress?.((transferred / total) * 100);
+                    cb(null, chunk);
+                }
+            }),
+            fss.createWriteStream(dest)
+        );
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                               FILE HASHING                                   */
+    /*                               FILE HASHING                                  */
     /* -------------------------------------------------------------------------- */
 
     static async hashFile(filePath, algorithm = "sha256") {
-        return new Promise((resolve, reject) => {
-            const hash = crypto.createHash(algorithm);
-            const stream = fss.createReadStream(filePath);
-
-            stream.on("data", data => hash.update(data));
-            stream.on("end", () => resolve(hash.digest("hex")));
-            stream.on("error", err => reject(err));
-        });
+        const hash = crypto.createHash(algorithm);
+        await pipeline(
+            fss.createReadStream(filePath),
+            hash
+        );
+        return hash.digest("hex");
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                               BULK OPERATIONS                                */
+    /*                               BACKUP SYSTEM                                 */
     /* -------------------------------------------------------------------------- */
 
-    static async deleteFiles(filePaths) {
+    static async createBackup(filePath) {
+        if (!(await this.fileExists(filePath))) {
+            throw new Error("File does not exist");
+        }
+
+        let i = 0;
+        let backup;
+        do {
+            backup = `${filePath}.backup${i ? "." + i : ""}`;
+            i++;
+        } while (await this.fileExists(backup));
+
+        await fs.copyFile(filePath, backup);
+        return backup;
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                               BULK OPERATIONS                               */
+    /* -------------------------------------------------------------------------- */
+
+    static async deleteFiles(files, concurrency = os.cpus().length) {
+        const queue = [...files];
         const results = [];
 
-        for (const file of filePaths) {
-            try {
-                await fs.unlink(file);
-                results.push({ file, status: "deleted" });
-            } catch (err) {
-                results.push({ file, status: "error", error: err.message });
+        const worker = async () => {
+            while (queue.length) {
+                const file = queue.pop();
+                try {
+                    await fs.unlink(file);
+                    results.push({ file, status: "deleted" });
+                } catch (e) {
+                    results.push({ file, status: "error", error: e.message });
+                }
             }
-        }
+        };
+
+        await Promise.all(
+            Array.from({ length: concurrency }, worker)
+        );
 
         return results;
     }
