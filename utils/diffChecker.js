@@ -1,50 +1,66 @@
 /**
- * Diff Checker Utility
- * Text difference checker and comparison tool
+ * Advanced Diff Checker Utility
+ * Line, word, and character-level comparison
  */
 
 export class DiffChecker {
 
     /**
-     * Compare two texts line-by-line
+     * Compare two texts line-by-line with alignment
      * @param {string} text1
      * @param {string} text2
+     * @param {Object} options
      * @returns {Array<Object>}
      */
-    static compare(text1 = "", text2 = "") {
+    static compare(text1 = "", text2 = "", options = {}) {
+        const {
+            ignoreCase = false,
+            trim = false
+        } = options;
+
+        const normalize = (line) => {
+            if (trim) line = line.trim();
+            if (ignoreCase) line = line.toLowerCase();
+            return line;
+        };
+
         const lines1 = text1.split("\n");
         const lines2 = text2.split("\n");
+
         const result = [];
+        const max = Math.max(lines1.length, lines2.length);
 
-        const maxLines = Math.max(lines1.length, lines2.length);
+        for (let i = 0; i < max; i++) {
+            const raw1 = lines1[i];
+            const raw2 = lines2[i];
 
-        for (let i = 0; i < maxLines; i++) {
-            const line1 = lines1[i] ?? "";
-            const line2 = lines2[i] ?? "";
+            const line1 = raw1 !== undefined ? normalize(raw1) : null;
+            const line2 = raw2 !== undefined ? normalize(raw2) : null;
 
-            if (line1 === line2) {
+            if (line1 === line2 && line1 !== null) {
                 result.push({
                     type: "unchanged",
-                    line: line1,
+                    line: raw1,
                     lineNumber: i + 1
                 });
-            } else if (line1 && !line2) {
+            } else if (line1 !== null && line2 === null) {
                 result.push({
                     type: "removed",
-                    line: line1,
+                    line: raw1,
                     lineNumber: i + 1
                 });
-            } else if (!line1 && line2) {
+            } else if (line1 === null && line2 !== null) {
                 result.push({
                     type: "added",
-                    line: line2,
+                    line: raw2,
                     lineNumber: i + 1
                 });
             } else {
                 result.push({
                     type: "modified",
-                    oldLine: line1,
-                    newLine: line2,
+                    oldLine: raw1,
+                    newLine: raw2,
+                    wordDiff: this.wordDiff(raw1, raw2),
                     lineNumber: i + 1
                 });
             }
@@ -54,12 +70,38 @@ export class DiffChecker {
     }
 
     /**
-     * Create a unified-style patch from diff results
+     * Word-level diff for modified lines
+     * @param {string} oldLine
+     * @param {string} newLine
+     */
+    static wordDiff(oldLine = "", newLine = "") {
+        const oldWords = oldLine.split(/\s+/);
+        const newWords = newLine.split(/\s+/);
+
+        const diff = [];
+        const max = Math.max(oldWords.length, newWords.length);
+
+        for (let i = 0; i < max; i++) {
+            if (oldWords[i] === newWords[i]) {
+                diff.push({ type: "unchanged", value: oldWords[i] });
+            } else {
+                if (oldWords[i]) diff.push({ type: "removed", value: oldWords[i] });
+                if (newWords[i]) diff.push({ type: "added", value: newWords[i] });
+            }
+        }
+
+        return diff;
+    }
+
+    /**
+     * Generate a unified diff patch
      * @param {Array<Object>} diff
+     * @param {string} fileA
+     * @param {string} fileB
      * @returns {string}
      */
-    static generatePatch(diff) {
-        let patch = "";
+    static generatePatch(diff, fileA = "a/file", fileB = "b/file") {
+        let patch = `--- ${fileA}\n+++ ${fileB}\n`;
 
         diff.forEach(change => {
             switch (change.type) {
@@ -75,22 +117,32 @@ export class DiffChecker {
                     break;
                 default:
                     patch += `  ${change.line}\n`;
-                    break;
             }
         });
 
-        return patch.trimEnd(); // Remove trailing newline
+        return patch.trimEnd();
     }
 
     /**
-     * Calculate similarity percentage between two texts (0–1)
-     * @param {string} text1
-     * @param {string} text2
-     * @returns {number}
+     * Hybrid similarity score (0–1)
+     * Combines line and character similarity
      */
     static similarity(text1 = "", text2 = "") {
-        const longer = text1.length >= text2.length ? text1 : text2;
-        const shorter = text1.length < text2.length ? text1 : text2;
+        if (!text1 && !text2) return 1;
+        if (!text1 || !text2) return 0;
+
+        const charScore = this.charSimilarity(text1, text2);
+        const lineScore = this.lineSimilarity(text1, text2);
+
+        return Number(((charScore + lineScore) / 2).toFixed(3));
+    }
+
+    /**
+     * Character-level similarity
+     */
+    static charSimilarity(a, b) {
+        const longer = a.length > b.length ? a : b;
+        const shorter = a.length > b.length ? b : a;
 
         if (longer.length === 0) return 1;
 
@@ -99,45 +151,40 @@ export class DiffChecker {
     }
 
     /**
-     * Levenshtein edit distance (optimized)
-     * @param {string} s1
-     * @param {string} s2
-     * @returns {number}
+     * Line-level similarity
+     */
+    static lineSimilarity(a, b) {
+        const aLines = a.split("\n");
+        const bLines = b.split("\n");
+
+        const matches = aLines.filter((l, i) => l === bLines[i]).length;
+        return matches / Math.max(aLines.length, bLines.length);
+    }
+
+    /**
+     * Optimized Levenshtein distance
      */
     static editDistance(s1 = "", s2 = "") {
         s1 = s1.toLowerCase();
         s2 = s2.toLowerCase();
 
-        const len1 = s1.length;
-        const len2 = s2.length;
+        const dp = Array.from({ length: s2.length + 1 }, (_, i) => i);
 
-        if (len1 === 0) return len2;
-        if (len2 === 0) return len1;
-
-        const dp = new Array(len2 + 1);
-
-        for (let j = 0; j <= len2; j++) {
-            dp[j] = j;
-        }
-
-        for (let i = 1; i <= len1; i++) {
+        for (let i = 1; i <= s1.length; i++) {
             let prev = dp[0];
             dp[0] = i;
 
-            for (let j = 1; j <= len2; j++) {
+            for (let j = 1; j <= s2.length; j++) {
                 const temp = dp[j];
-                const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-
                 dp[j] = Math.min(
-                    dp[j] + 1,        // deletion
-                    dp[j - 1] + 1,    // insertion
-                    prev + cost       // substitution
+                    dp[j] + 1,
+                    dp[j - 1] + 1,
+                    prev + (s1[i - 1] === s2[j - 1] ? 0 : 1)
                 );
-
                 prev = temp;
             }
         }
 
-        return dp[len2];
+        return dp[s2.length];
     }
 }
