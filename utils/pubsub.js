@@ -1,70 +1,126 @@
-// Publish-Subscribe system
+/**
+ * Publish–Subscribe (PubSub) System
+ * Supports channels, history, replay, and safe subscriptions
+ */
+
 class PubSub {
-    constructor() {
-        this.channels = new Map();
-        this.history = new Map();
-        this.maxHistory = 100;
+    #channels = new Map();
+    #history = new Map();
+
+    constructor({ maxHistory = 100 } = {}) {
+        this.maxHistory = maxHistory;
     }
 
-    subscribe(channel, callback) {
-        if (!this.channels.has(channel)) {
-            this.channels.set(channel, new Set());
+    /* =========================
+       Subscriptions
+    ========================== */
+
+    subscribe(channel, callback, { replay = 0 } = {}) {
+        if (!this.#channels.has(channel)) {
+            this.#channels.set(channel, new Set());
         }
-        this.channels.get(channel).add(callback);
+
+        this.#channels.get(channel).add(callback);
+
+        // Optional replay
+        if (replay > 0) {
+            this.getHistory(channel, replay).forEach(msg => {
+                callback(msg.data, channel, msg.timestamp);
+            });
+        }
 
         return () => this.unsubscribe(channel, callback);
     }
 
+    once(channel, callback) {
+        const unsubscribe = this.subscribe(channel, (data) => {
+            unsubscribe();
+            callback(data, channel);
+        });
+    }
+
     unsubscribe(channel, callback) {
-        const channelCallbacks = this.channels.get(channel);
-        if (channelCallbacks) {
-            channelCallbacks.delete(callback);
-            if (channelCallbacks.size === 0) {
-                this.channels.delete(channel);
-            }
+        const subs = this.#channels.get(channel);
+        if (!subs) return;
+
+        subs.delete(callback);
+        if (subs.size === 0) {
+            this.#channels.delete(channel);
         }
     }
+
+    /* =========================
+       Publishing
+    ========================== */
 
     publish(channel, data) {
-        if (!this.history.has(channel)) {
-            this.history.set(channel, []);
-        }
-        const channelHistory = this.history.get(channel);
-        channelHistory.push({
+        const message = {
             data,
             timestamp: Date.now()
+        };
+
+        if (!this.#history.has(channel)) {
+            this.#history.set(channel, []);
+        }
+
+        const history = this.#history.get(channel);
+        history.push(message);
+
+        if (history.length > this.maxHistory) {
+            history.shift();
+        }
+
+        const subs = this.#channels.get(channel);
+        if (!subs) return 0;
+
+        subs.forEach(cb => {
+            try {
+                cb(data, channel, message.timestamp);
+            } catch (err) {
+                console.error(`PubSub error on "${channel}":`, err);
+            }
         });
 
-        if (channelHistory.length > this.maxHistory) {
-            channelHistory.shift();
-        }
-
-        const callbacks = this.channels.get(channel);
-        if (callbacks) {
-            callbacks.forEach(callback => {
-                try {
-                    callback(data, channel);
-                } catch (error) {
-                    console.error('PubSub callback error:', error);
-                }
-            });
-        }
-
-        return callbacks ? callbacks.size : 0;
+        return subs.size;
     }
+
+    /* =========================
+       History
+    ========================== */
 
     getHistory(channel, limit = 10) {
-        const history = this.history.get(channel) || [];
-        return history.slice(-limit);
+        return (this.#history.get(channel) || []).slice(-limit);
     }
+
+    clearHistory(channel = null) {
+        if (channel) {
+            this.#history.delete(channel);
+        } else {
+            this.#history.clear();
+        }
+    }
+
+    /* =========================
+       Stats
+    ========================== */
 
     getSubscriberCount(channel = null) {
         if (channel) {
-            return this.channels.get(channel)?.size || 0;
+            return this.#channels.get(channel)?.size || 0;
         }
-        return Array.from(this.channels.values()).reduce((sum, callbacks) => sum + callbacks.size, 0);
+
+        return [...this.#channels.values()]
+            .reduce((sum, set) => sum + set.size, 0);
+    }
+
+    getChannels() {
+        return [...this.#channels.keys()];
+    }
+
+    reset() {
+        this.#channels.clear();
+        this.#history.clear();
     }
 }
 
 module.exports = PubSub;
-
