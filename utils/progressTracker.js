@@ -1,165 +1,119 @@
 /**
- * Advanced Progress Tracker Utility
- * Accurate, extensible progress tracking with ETA & lifecycle control
+ * Progress Tracker Utility
+ * Progress tracking system for monitoring task completion
  */
 
+/**
+ * ProgressTracker class for tracking progress
+ */
 export class ProgressTracker {
-    constructor({
-        total = 100,
-        precision = 2,
-        smoothingFactor = 0.2
-    } = {}) {
-        this.total = Math.max(0, total);
+    constructor(total = 100) {
+        this.total = total;
         this.current = 0;
-        this.precision = precision;
-        this.smoothingFactor = smoothingFactor;
-
         this.listeners = [];
-        this.completeListeners = [];
-
         this.startTime = null;
         this.endTime = null;
-        this.lastUpdateTime = null;
-
-        this.paused = false;
-        this.smoothedRate = null;
     }
-
-    /* -------------------- Core Controls -------------------- */
-
+    
+    /**
+     * Set total value
+     * @param {number} total - Total value
+     */
     setTotal(total) {
-        this.total = Math.max(0, total);
-        this.notify();
+        this.total = total;
+        this.notifyListeners();
     }
-
-    setProgress(value) {
-        if (this.paused) return;
-
-        const now = performance.now();
-        if (!this.startTime) {
-            this.startTime = now;
-            this.lastUpdateTime = now;
-        }
-
-        const delta = value - this.current;
-        const deltaTime = now - this.lastUpdateTime;
-
-        if (deltaTime > 0 && delta > 0) {
-            const rate = delta / deltaTime;
-            this.smoothedRate = this.smoothedRate == null
-                ? rate
-                : this.smoothedRate * (1 - this.smoothingFactor) + rate * this.smoothingFactor;
-        }
-
-        this.current = Math.min(Math.max(0, value), this.total);
-        this.lastUpdateTime = now;
-
+    
+    /**
+     * Set current progress
+     * @param {number} current - Current progress value
+     */
+    setProgress(current) {
+        this.current = Math.min(Math.max(0, current), this.total);
+        if (!this.startTime) this.startTime = Date.now();
+        this.notifyListeners();
+        
         if (this.current >= this.total && !this.endTime) {
-            this.endTime = now;
-            this.notifyComplete();
+            this.endTime = Date.now();
         }
-
-        this.notify();
     }
-
+    
+    /**
+     * Increment progress
+     * @param {number} amount - Amount to increment
+     */
     increment(amount = 1) {
         this.setProgress(this.current + amount);
     }
-
-    complete() {
-        this.setProgress(this.total);
-    }
-
-    reset() {
-        this.current = 0;
-        this.startTime = null;
-        this.endTime = null;
-        this.lastUpdateTime = null;
-        this.smoothedRate = null;
-        this.paused = false;
-        this.notify();
-    }
-
-    pause() {
-        this.paused = true;
-    }
-
-    resume() {
-        if (!this.paused) return;
-        this.paused = false;
-        this.lastUpdateTime = performance.now();
-    }
-
-    /* -------------------- Info & Metrics -------------------- */
-
+    
+    /**
+     * Get progress percentage
+     * @returns {number} - Progress percentage (0-100)
+     */
     getPercentage() {
-        return this.total > 0
-            ? Number(((this.current / this.total) * 100).toFixed(this.precision))
-            : 0;
+        return this.total > 0 ? Math.round((this.current / this.total) * 100) : 0;
     }
-
-    getElapsedTime() {
-        if (!this.startTime) return 0;
-        return (this.endTime ?? performance.now()) - this.startTime;
-    }
-
-    getEstimatedTimeRemaining() {
-        if (!this.smoothedRate || this.current === 0) return null;
-        const remaining = this.total - this.current;
-        return remaining / this.smoothedRate;
-    }
-
+    
+    /**
+     * Get progress information
+     * @returns {Object} - Progress information object
+     */
     getInfo() {
-        return Object.freeze({
+        return {
             current: this.current,
             total: this.total,
             percentage: this.getPercentage(),
             isComplete: this.current >= this.total,
-            paused: this.paused,
-            elapsedTime: this.getElapsedTime(),
-            estimatedTimeRemaining: this.getEstimatedTimeRemaining(),
-            startTime: this.startTime,
-            endTime: this.endTime
-        });
+            elapsedTime: this.startTime ? Date.now() - this.startTime : 0,
+            totalTime: this.endTime ? this.endTime - this.startTime : null,
+            estimatedTimeRemaining: this.getEstimatedTimeRemaining()
+        };
     }
-
-    /* -------------------- Listeners -------------------- */
-
+    
+    /**
+     * Get estimated time remaining
+     * @returns {number|null} - Estimated time in milliseconds
+     */
+    getEstimatedTimeRemaining() {
+        if (!this.startTime || this.current === 0) return null;
+        
+        const elapsed = Date.now() - this.startTime;
+        const rate = this.current / elapsed;
+        const remaining = this.total - this.current;
+        
+        return remaining / rate;
+    }
+    
+    /**
+     * Reset progress tracker
+     */
+    reset() {
+        this.current = 0;
+        this.startTime = null;
+        this.endTime = null;
+        this.notifyListeners();
+    }
+    
+    /**
+     * Subscribe to progress changes
+     * @param {Function} listener - Listener function
+     * @returns {Function} - Unsubscribe function
+     */
     subscribe(listener) {
         this.listeners.push(listener);
-        listener(this.getInfo());
-
         return () => {
-            this.listeners = this.listeners.filter(l => l !== listener);
+            const index = this.listeners.indexOf(listener);
+            if (index > -1) {
+                this.listeners.splice(index, 1);
+            }
         };
     }
-
-    onComplete(listener) {
-        this.completeListeners.push(listener);
-        return () => {
-            this.completeListeners = this.completeListeners.filter(l => l !== listener);
-        };
-    }
-
-    notify() {
+    
+    /**
+     * Notify all listeners
+     */
+    notifyListeners() {
         const info = this.getInfo();
-        this.listeners.forEach(fn => {
-            try {
-                fn(info);
-            } catch (err) {
-                console.error("ProgressTracker listener error:", err);
-            }
-        });
-    }
-
-    notifyComplete() {
-        const info = this.getInfo();
-        this.completeListeners.forEach(fn => {
-            try {
-                fn(info);
-            } catch (err) {
-                console.error("ProgressTracker completion listener error:", err);
-            }
-        });
+        this.listeners.forEach(listener => listener(info));
     }
 }
