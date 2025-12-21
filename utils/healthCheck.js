@@ -1,27 +1,25 @@
 /**
- * HealthCheck Manager
- * A more advanced and production-ready implementation
- * supporting cooldown, parallel execution, tagging, and rich output.
+ * HealthCheck Manager – v2 (Production Ready)
  */
 class HealthCheck {
     constructor(options = {}) {
         this.checks = new Map();
-        this.timeout = options.timeout || 5000;
-        this.parallel = options.parallel !== false; // default: run in parallel
+        this.timeout = options.timeout ?? 5000;
+        this.parallel = options.parallel !== false;
+        this.cacheTTL = options.cacheTTL ?? 0; // ms
+        this.hooks = {
+            onStart: options.onStart,
+            onSuccess: options.onSuccess,
+            onFailure: options.onFailure
+        };
     }
 
-    /**
-     * Register a health check
-     * @param {string} name 
-     * @param {Function} checkFn must return true/false or throw on failure
-     * @param {object} options 
-     */
     register(name, checkFn, options = {}) {
         if (!name || typeof name !== "string") {
             throw new Error("Health check name must be a non-empty string");
         }
         if (this.checks.has(name)) {
-            throw new Error(`Health check ${name} already registered`);
+            throw new Error(`Health check "${name}" already registered`);
         }
         if (typeof checkFn !== "function") {
             throw new Error("Health check must be a function");
@@ -31,8 +29,11 @@ class HealthCheck {
             name,
             checkFn,
             critical: options.critical !== false,
-            cooldown: options.cooldown || 0, // ms before allowed to re-check
-            tags: options.tags || [],
+            tags: options.tags ?? [],
+            timeout: options.timeout ?? this.timeout,
+            retries: options.retries ?? 0,
+            retryDelay: options.retryDelay ?? 0,
+            cooldown: options.cooldown ?? 0,
             lastCheckedAt: null,
             lastResult: null
         });
@@ -40,156 +41,175 @@ class HealthCheck {
         return this;
     }
 
-    /**
-     * Unregister a health check
-     */
     unregister(name) {
         this.checks.delete(name);
         return this;
     }
 
     /**
-     * Returns a check instance by name
+     * Run checks
+     * @param {object|string} input
      */
-    getCheck(name) {
-        return this.checks.get(name) || null;
-    }
+    async run(input) {
+        let targetChecks = [...this.checks.values()];
 
-    /**
-     * Run a single check or all checks
-     */
-    async run(name) {
-        if (name) {
-            const check = this.getCheck(name);
-            if (!check) throw new Error(`Health check ${name} not registered`);
-
-            const result = await this.executeIfReady(check);
-
-            return {
-                status: this.aggregateStatus([result]),
-                details: { [name]: result }
-            };
+        if (typeof input === "string") {
+            const check = this.checks.get(input);
+            if (!check) throw new Error(`Health check "${input}" not registered`);
+            targetChecks = [check];
         }
 
-        const tasks = [];
-        const arr = [...this.checks.values()];
-
-        for (const check of arr) {
-            if (this.parallel)
-                tasks.push(this.executeIfReady(check));
-            else
-                tasks.push(await this.executeIfReady(check));
+        if (input?.tags?.length) {
+            targetChecks = targetChecks.filter(c =>
+                c.tags.some(t => input.tags.includes(t))
+            );
         }
 
-        const results = this.parallel ? await Promise.all(tasks) : tasks;
+        const tasks = targetChecks.map(check =>
+            this.parallel
+                ? this.executeIfReady(check)
+                : () => this.executeIfReady(check)
+        );
 
-        const response = {};
-        arr.forEach((check, i) => response[check.name] = results[i]);
+        const results = this.parallel
+            ? await Promise.all(tasks)
+            : await this.runSequential(tasks);
+
+        const details = {};
+        results.forEach(r => details[r.name] = r);
 
         return {
             status: this.aggregateStatus(results),
-            details: response
+            timestamp: new Date().toISOString(),
+            details
         };
     }
 
-    /**
-     * Execute check only if cooldown expired
-     */
+    async runSequential(tasks) {
+        const results = [];
+        for (const task of tasks) {
+            results.push(await task());
+        }
+        return results;
+    }
+
     async executeIfReady(check) {
         const now = Date.now();
-        if (check.lastCheckedAt && (now - check.lastCheckedAt) < check.cooldown) {
-            // Return cached result
-            return check.lastResult;
+
+        if (
+            check.lastResult &&
+            this.cacheTTL &&
+            now - check.lastCheckedAt < this.cacheTTL
+        ) {
+            return { ...check.lastResult, cached: true };
         }
+
+        if (
+            check.lastCheckedAt &&
+            now - check.lastCheckedAt < check.cooldown
+        ) {
+            return { ...check.lastResult, skipped: true };
+        }
+
         return this.executeCheck(check);
     }
 
-    /**
-     * Run the actual health check
-     */
     async executeCheck(check) {
-        const start = Date.now();
-        let status = "pass";
+        const startedAt = Date.now();
+        let attempt = 0;
         let error = null;
+        let status = "pass";
 
-        try {
-            const result = await this.withTimeout(check.checkFn(), this.timeout);
-            if (result === false) {
-                status = check.critical ? "fail" : "warn";
+        this.hooks.onStart?.(check.name);
+
+        while (attempt <= check.retries) {
+            try {
+                attempt++;
+                const result = await this.withTimeout(
+                    Promise.resolve().then(check.checkFn),
+                    check.timeout
+                );
+
+                if (result === false) {
+                    status = check.critical ? "fail" : "warn";
+                    break;
+                }
+
+                status = "pass";
+                break;
+            } catch (err) {
+                error = err;
+                if (attempt > check.retries) {
+                    status = check.critical ? "fail" : "warn";
+                } else if (check.retryDelay) {
+                    await this.sleep(check.retryDelay);
+                }
             }
-        } catch (err) {
-            status = check.critical ? "fail" : "warn";
-            error = {
-                message: err.message,
-                stack: err.stack
-            };
         }
 
-        const duration = Date.now() - start;
-
-        const output = {
+        const output = Object.freeze({
             name: check.name,
             status,
             critical: check.critical,
-            duration,
-            error,
-            tags: check.tags,
-            timestamp: new Date()
-        };
+            duration: Date.now() - startedAt,
+            attempts: attempt,
+            tags: [...check.tags],
+            error: error
+                ? { message: error.message, stack: error.stack }
+                : null,
+            timestamp: new Date().toISOString()
+        });
 
         check.lastCheckedAt = Date.now();
         check.lastResult = output;
 
+        if (status === "pass") this.hooks.onSuccess?.(output);
+        else this.hooks.onFailure?.(output);
+
         return output;
     }
 
-    /**
-     * Determine global status
-     */
     aggregateStatus(results) {
         if (results.some(r => r.status === "fail")) return "fail";
         if (results.some(r => r.status === "warn")) return "warn";
         return "pass";
     }
 
-    /**
-     * Promise with timeout wrapper
-     */
     async withTimeout(promise, timeout) {
         let timer;
         return Promise.race([
-            Promise.resolve(promise),
+            promise,
             new Promise((_, reject) => {
-                timer = setTimeout(() => 
-                    reject(new Error("Health check timeout exceeded")), timeout);
+                timer = setTimeout(
+                    () => reject(new Error("Health check timeout exceeded")),
+                    timeout
+                );
             })
         ]).finally(() => clearTimeout(timer));
     }
 
-    /**
-     * Quick healthy check: true/false
-     */
-    isHealthy() {
-        const results = [...this.checks.values()].map(c => c.lastResult);
-        return !results.some(r => r && r.status === "fail");
+    sleep(ms) {
+        return new Promise(res => setTimeout(res, ms));
     }
 
-    /**
-     * Returns summary of all checks
-     */
+    isHealthy() {
+        return ![...this.checks.values()]
+            .some(c => c.lastResult?.status === "fail");
+    }
+
     summary() {
-        const summary = {};
-        for (const [name, check] of this.checks) {
-            summary[name] = {
-                lastResult: check.lastResult,
-                lastCheckedAt: check.lastCheckedAt
-                    ? new Date(check.lastCheckedAt)
+        const out = {};
+        for (const [name, c] of this.checks) {
+            out[name] = {
+                status: c.lastResult?.status ?? "unknown",
+                lastCheckedAt: c.lastCheckedAt
+                    ? new Date(c.lastCheckedAt).toISOString()
                     : null,
-                critical: check.critical,
-                tags: check.tags
+                critical: c.critical,
+                tags: c.tags
             };
         }
-        return summary;
+        return out;
     }
 }
 
