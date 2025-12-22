@@ -1,155 +1,56 @@
 /**
- * Performance Utility Functions (Optimized Version)
- * Debounce, Throttle & Advanced Debounce Helpers
+ * =====================================================
+ * Performance Utilities – Upgraded (2025 Edition)
+ * Debounce • Throttle • RAF Throttle • Advanced Controls
+ * =====================================================
  */
 
-/**
- * Debounce (simple)
- * Delays execution until user stops triggering for `wait` ms
- */
-export function debounce(func, wait = 0, immediate = false) {
-  let timeout;
-
-  return function debounced(...args) {
-    const context = this;
-
-    const later = () => {
-      timeout = null;
-      if (!immediate) func.apply(context, args);
-    };
-
-    const shouldCallNow = immediate && !timeout;
-
-    clearTimeout(timeout);
-    timeout = setTimeout(later, wait);
-
-    if (shouldCallNow) {
-      return func.apply(context, args);
-    }
-  };
-}
-
-/**
- * Throttle (simple)
- * Ensures func runs at most once per `limit` ms
- */
-export function throttle(func, limit = 0) {
-  let inThrottle = false;
-
-  return function throttled(...args) {
-    const context = this;
-
-    if (!inThrottle) {
-      func.apply(context, args);
-      inThrottle = true;
-
-      setTimeout(() => {
-        inThrottle = false;
-      }, limit);
-    }
-  };
-}
-
-/**
- * Throttle (advanced)
- * Supports { leading: Boolean, trailing: Boolean }
- */
-export function throttleAdvanced(func, wait = 0, opts = {}) {
-  let timeout = null;
-  let lastArgs = null;
-  let lastThis = null;
-  let lastCallTime = 0;
-
-  const leading = opts.leading ?? true;
-  const trailing = opts.trailing ?? true;
-
-  const invoke = (time) => {
-    lastCallTime = time;
-    func.apply(lastThis, lastArgs);
-    lastArgs = lastThis = null;
-  };
-
-  const startTimer = (remaining) => {
-    timeout = setTimeout(() => {
-      timeout = null;
-      if (trailing && lastArgs) invoke(Date.now());
-    }, remaining);
-  };
-
-  return function throttled(...args) {
-    const now = Date.now();
-
-    if (!lastCallTime && !leading) {
-      lastCallTime = now;
-    }
-
-    const remaining = wait - (now - lastCallTime);
-    lastArgs = args;
-    lastThis = this;
-
-    if (remaining <= 0 || remaining > wait) {
-      if (timeout) {
-        clearTimeout(timeout);
-        timeout = null;
-      }
-      invoke(now);
-    } else if (!timeout && trailing) {
-      startTimer(remaining);
-    }
-  };
-}
-
-/**
- * Advanced Debounce
- * Improved clarity, safety, modern JS.
- */
-export function debounceAdvanced(func, wait = 0, options = {}) {
+/* ---------------------------------------
+ * Debounce (Modern, Safe, Promise-aware)
+ * ------------------------------------- */
+export function debounce(
+  func,
+  wait = 0,
+  {
+    leading = false,
+    trailing = true,
+    maxWait,
+    signal,
+  } = {}
+) {
   if (typeof func !== "function") {
     throw new TypeError("Expected a function");
   }
 
   let timeout = null;
-  let lastArgs = null;
-  let lastThis = null;
-  let result;
-  let lastCallTime = 0;
+  let lastArgs;
+  let lastThis;
   let lastInvokeTime = 0;
+  let result;
 
-  const leading = options.leading ?? false;
-  const trailing = options.trailing ?? true;
-  const maxing = "maxWait" in options;
-
-  const maxWait = maxing
-    ? Math.max(Number(options.maxWait) || 0, wait)
-    : null;
-
-  const invokeFunc = (time) => {
-    result = func.apply(lastThis, lastArgs);
+  const invoke = (time) => {
     lastInvokeTime = time;
+    result = func.apply(lastThis, lastArgs);
     lastArgs = lastThis = null;
     return result;
   };
 
-  const shouldInvoke = (time) => {
-    const timeSinceCall = time - lastCallTime;
-    const timeSinceInvoke = time - lastInvokeTime;
-
-    return (
-      lastCallTime === 0 ||
-      timeSinceCall >= wait ||
-      timeSinceCall < 0 ||
-      (maxing && timeSinceInvoke >= maxWait)
-    );
+  const startTimer = (pending, delay) => {
+    timeout = setTimeout(pending, delay);
   };
 
-  const remainingWait = (time) => {
-    const timeSinceCall = time - lastCallTime;
-    const timeSinceInvoke = time - lastInvokeTime;
+  const shouldInvoke = (time) =>
+    lastInvokeTime === 0 ||
+    time - lastInvokeTime >= wait ||
+    (maxWait && time - lastInvokeTime >= maxWait);
 
-    const waitRemaining = wait - timeSinceCall;
-    return maxing
-      ? Math.min(waitRemaining, maxWait - timeSinceInvoke)
-      : waitRemaining;
+  const trailingEdge = (time) => {
+    timeout = null;
+    if (trailing && lastArgs) {
+      return invoke(time);
+    }
+    lastArgs = lastThis = null;
+    return result;
   };
 
   const timerExpired = () => {
@@ -157,47 +58,19 @@ export function debounceAdvanced(func, wait = 0, options = {}) {
     if (shouldInvoke(now)) {
       return trailingEdge(now);
     }
-    timeout = setTimeout(timerExpired, remainingWait(now));
-  };
-
-  const leadingEdge = (time) => {
-    lastInvokeTime = time;
-    timeout = setTimeout(timerExpired, wait);
-    return leading ? invokeFunc(time) : result;
-  };
-
-  const trailingEdge = (time) => {
-    timeout = null;
-
-    if (trailing && lastArgs) {
-      return invokeFunc(time);
-    }
-
-    lastArgs = lastThis = null;
-    return result;
+    startTimer(timerExpired, wait - (now - lastInvokeTime));
   };
 
   const debounced = function (...args) {
     const now = Date.now();
-
-    lastCallTime = now;
     lastArgs = args;
     lastThis = this;
 
-    const shouldCall = shouldInvoke(now);
-
-    if (shouldCall) {
-      if (!timeout) {
-        return leadingEdge(now);
-      }
-      if (maxing) {
-        timeout = setTimeout(timerExpired, wait);
-        return invokeFunc(now);
-      }
-    }
-
     if (!timeout) {
-      timeout = setTimeout(timerExpired, wait);
+      if (leading) {
+        invoke(now);
+      }
+      startTimer(timerExpired, wait);
     }
 
     return result;
@@ -205,7 +78,7 @@ export function debounceAdvanced(func, wait = 0, options = {}) {
 
   debounced.cancel = () => {
     if (timeout) clearTimeout(timeout);
-    timeout = lastArgs = lastThis = lastCallTime = lastInvokeTime = null;
+    timeout = lastArgs = lastThis = null;
   };
 
   debounced.flush = () => {
@@ -214,5 +87,87 @@ export function debounceAdvanced(func, wait = 0, options = {}) {
 
   debounced.pending = () => !!timeout;
 
+  if (signal) {
+    signal.addEventListener("abort", debounced.cancel, { once: true });
+  }
+
   return debounced;
+}
+
+/* ---------------------------------------
+ * Throttle (Time-based)
+ * ------------------------------------- */
+export function throttle(
+  func,
+  wait = 0,
+  { leading = true, trailing = true } = {}
+) {
+  let timeout = null;
+  let lastArgs;
+  let lastThis;
+  let lastCallTime = 0;
+
+  const invoke = (time) => {
+    lastCallTime = time;
+    func.apply(lastThis, lastArgs);
+    lastArgs = lastThis = null;
+  };
+
+  const trailingEdge = () => {
+    timeout = null;
+    if (trailing && lastArgs) {
+      invoke(Date.now());
+    }
+  };
+
+  return function throttled(...args) {
+    const now = Date.now();
+    const remaining = wait - (now - lastCallTime);
+
+    lastArgs = args;
+    lastThis = this;
+
+    if (remaining <= 0) {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      invoke(now);
+    } else if (!timeout && trailing) {
+      timeout = setTimeout(trailingEdge, remaining);
+    }
+  };
+}
+
+/* ---------------------------------------
+ * Throttle via requestAnimationFrame
+ * (Perfect for scroll / resize / mousemove)
+ * ------------------------------------- */
+export function throttleRAF(func) {
+  let ticking = false;
+  let lastArgs;
+  let lastThis;
+
+  return function (...args) {
+    lastArgs = args;
+    lastThis = this;
+
+    if (!ticking) {
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        func.apply(lastThis, lastArgs);
+      });
+    }
+  };
+}
+
+/* ---------------------------------------
+ * Combined Utility
+ * Auto picks best strategy
+ * ------------------------------------- */
+export function smartRateLimit(func, wait = 0, opts = {}) {
+  if (wait === 0) return throttleRAF(func);
+  if (opts.throttle) return throttle(func, wait, opts);
+  return debounce(func, wait, opts);
 }
