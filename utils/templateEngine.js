@@ -1,78 +1,110 @@
 /**
- * Template Engine Utility
- * Simple template engine for string interpolation
+ * Advanced Template Engine Utility
+ * Supports variables, nested paths, conditionals, loops, helpers, and escaping
  */
 
-/**
- * TemplateEngine class for rendering templates
- */
 export class TemplateEngine {
     /**
-     * Render template with variables
-     * @param {string} template - Template string with {{variable}} placeholders
-     * @param {Object} data - Data object with variable values
-     * @returns {string} - Rendered template
+     * Escape HTML to prevent XSS
      */
-    static render(template, data) {
-        return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-            return data[key] !== undefined ? data[key] : match;
-        });
+    static escapeHTML(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
-    
+
     /**
-     * Render template with nested object support
-     * @param {string} template - Template string with {{object.key}} placeholders
-     * @param {Object} data - Data object
-     * @returns {string} - Rendered template
+     * Resolve deep object path safely
      */
-    static renderNested(template, data) {
-        return template.replace(/\{\{([\w.]+)\}\}/g, (match, path) => {
-            const keys = path.split('.');
-            let value = data;
-            
-            for (const key of keys) {
-                if (value && typeof value === 'object' && key in value) {
-                    value = value[key];
-                } else {
-                    return match;
-                }
-            }
-            
-            return value !== undefined ? value : match;
-        });
+    static resolvePath(obj, path) {
+        return path.split('.').reduce((acc, key) => {
+            return acc && acc[key] !== undefined ? acc[key] : undefined;
+        }, obj);
     }
-    
+
     /**
-     * Render template with conditionals and loops
-     * @param {string} template - Template string with helpers
-     * @param {Object} data - Data object
-     * @returns {string} - Rendered template
+     * Core render method
      */
-    static renderWithHelpers(template, data) {
+    static render(template, data = {}, helpers = {}) {
         let result = template;
-        
-        result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (match, condition, content) => {
-            return data[condition] ? content : '';
-        });
-        
-        result = result.replace(/\{\{#each\s+(\w+)\}\}([\s\S]*?)\{\{\/each\}\}/g, (match, arrayName, content) => {
-            const array = data[arrayName];
-            if (!Array.isArray(array)) return '';
-            
-            return array.map(item => {
-                return this.render(content, { ...data, ...item });
-            }).join('');
-        });
-        
-        return this.renderNested(result, data);
+
+        /* =========================
+           EACH LOOP
+        ========================== */
+        result = result.replace(
+            /\{\{#each\s+([\w.]+)\}\}([\s\S]*?)\{\{\/each\}\}/g,
+            (_, path, block) => {
+                const array = this.resolvePath(data, path);
+                if (!Array.isArray(array)) return '';
+
+                return array.map((item, index) => {
+                    return this.render(block, {
+                        ...data,
+                        ...item,
+                        '@index': index,
+                        '@first': index === 0,
+                        '@last': index === array.length - 1
+                    }, helpers);
+                }).join('');
+            }
+        );
+
+        /* =========================
+           IF / ELSE
+        ========================== */
+        result = result.replace(
+            /\{\{#if\s+([\w.]+)\}\}([\s\S]*?)(?:\{\{else\}\}([\s\S]*?))?\{\{\/if\}\}/g,
+            (_, condition, ifBlock, elseBlock) => {
+                const value = this.resolvePath(data, condition);
+                return value ? ifBlock : (elseBlock || '');
+            }
+        );
+
+        /* =========================
+           HELPERS {{ helper arg }}
+        ========================== */
+        result = result.replace(
+            /\{\{(\w+)\s+([\w.]+)\}\}/g,
+            (_, helperName, path) => {
+                if (helpers[helperName]) {
+                    return helpers[helperName](this.resolvePath(data, path), data);
+                }
+                return _;
+            }
+        );
+
+        /* =========================
+           RAW (NO ESCAPE) {{{value}}}
+        ========================== */
+        result = result.replace(
+            /\{\{\{([\w.]+)\}\}\}/g,
+            (_, path) => {
+                const value = this.resolvePath(data, path);
+                return value ?? '';
+            }
+        );
+
+        /* =========================
+           SAFE ESCAPED {{value}}
+        ========================== */
+        result = result.replace(
+            /\{\{([\w.]+)\}\}/g,
+            (_, path) => {
+                const value = this.resolvePath(data, path);
+                return value !== undefined ? this.escapeHTML(value) : '';
+            }
+        );
+
+        return result;
     }
-    
+
     /**
-     * Compile template to a function
-     * @param {string} template - Template string
-     * @returns {Function} - Compiled template function
+     * Compile template to reusable function
      */
-    static compile(template) {
-        return (data) => this.renderNested(template, data);
+    static compile(template, helpers = {}) {
+        return (data) => this.render(template, data, helpers);
     }
 }
