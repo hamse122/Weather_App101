@@ -1,33 +1,61 @@
-// Advanced task runner with dependencies
 class TaskRunner {
-    constructor() {
+    constructor(options = {}) {
         this.tasks = new Map();
         this.results = new Map();
         this.executionOrder = [];
+
+        this.options = {
+            parallel: true,
+            failFast: true,
+            ...options
+        };
     }
 
-    task(name, dependencies = [], taskFn) {
+    task(
+        name,
+        dependencies = [],
+        taskFn,
+        {
+            retries = 0,
+            timeout = null,
+            before = null,
+            after = null
+        } = {}
+    ) {
         if (typeof taskFn !== 'function') {
             throw new Error('Task function must be provided');
         }
-        this.tasks.set(name, { dependencies, taskFn, executed: false });
+
+        this.tasks.set(name, {
+            name,
+            dependencies,
+            taskFn,
+            retries,
+            timeout,
+            before,
+            after,
+            executed: false
+        });
+
         return this;
     }
 
-    async run(targetTask = null) {
+    async run(target = null) {
         this.results.clear();
         this.executionOrder = [];
 
-        const tasksToRun = targetTask
-            ? this.getTaskDependencies(targetTask)
-            : Array.from(this.tasks.keys());
+        const order = this.topologicalSort(target);
 
-        this.tasks.forEach(task => {
+        for (const task of order) {
             task.executed = false;
-        });
+        }
 
-        for (const taskName of tasksToRun) {
-            await this.executeTask(taskName);
+        if (this.options.parallel) {
+            await this.runParallel(order);
+        } else {
+            for (const task of order) {
+                await this.executeTask(task);
+            }
         }
 
         return {
@@ -36,50 +64,108 @@ class TaskRunner {
         };
     }
 
-    async executeTask(taskName) {
-        const task = this.tasks.get(taskName);
-        if (!task) {
-            throw new Error(`Task ${taskName} not found`);
-        }
-        if (task.executed) {
-            return;
-        }
+    async runParallel(tasks) {
+        const pending = new Map(tasks.map(t => [t.name, t]));
 
-        for (const dep of task.dependencies) {
-            await this.executeTask(dep);
-        }
+        while (pending.size) {
+            const ready = [...pending.values()].filter(t =>
+                t.dependencies.every(d => this.results.has(d))
+            );
 
-        const result = await task.taskFn(this.results);
-        this.results.set(taskName, result);
-        task.executed = true;
-        this.executionOrder.push(taskName);
+            if (!ready.length) {
+                throw new Error('Deadlock detected (cyclic dependency)');
+            }
+
+            await Promise.all(
+                ready.map(async task => {
+                    await this.executeTask(task);
+                    pending.delete(task.name);
+                })
+            );
+        }
     }
 
-    getTaskDependencies(taskName, visited = new Set()) {
-        if (visited.has(taskName)) {
-            return [];
-        }
-        visited.add(taskName);
+    async executeTask(task) {
+        if (task.executed) return;
 
-        const task = this.tasks.get(taskName);
-        if (!task) {
-            throw new Error(`Task ${taskName} not found`);
+        let attempts = 0;
+
+        while (true) {
+            try {
+                if (task.before) await task.before(this.results);
+
+                const result = await this.withTimeout(
+                    task.taskFn(this.results),
+                    task.timeout
+                );
+
+                if (task.after) await task.after(result, this.results);
+
+                this.results.set(task.name, result);
+                task.executed = true;
+                this.executionOrder.push(task.name);
+                return;
+            } catch (err) {
+                attempts++;
+                if (attempts > task.retries) {
+                    if (this.options.failFast) throw err;
+                    this.results.set(task.name, err);
+                    return;
+                }
+            }
+        }
+    }
+
+    withTimeout(promise, ms) {
+        if (!ms) return promise;
+
+        return Promise.race([
+            promise,
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Task timeout')), ms)
+            )
+        ]);
+    }
+
+    topologicalSort(target = null) {
+        const visited = new Set();
+        const visiting = new Set();
+        const order = [];
+
+        const visit = (name) => {
+            if (visiting.has(name)) {
+                throw new Error(`Circular dependency detected at ${name}`);
+            }
+            if (visited.has(name)) return;
+
+            const task = this.tasks.get(name);
+            if (!task) throw new Error(`Task ${name} not found`);
+
+            visiting.add(name);
+            for (const dep of task.dependencies) {
+                visit(dep);
+            }
+            visiting.delete(name);
+            visited.add(name);
+            order.push(task);
+        };
+
+        if (target) {
+            visit(target);
+        } else {
+            this.tasks.forEach((_, name) => visit(name));
         }
 
-        let dependencies = [taskName];
-        for (const dep of task.dependencies) {
-            dependencies = [...this.getTaskDependencies(dep, visited), ...dependencies];
-        }
-
-        return [...new Set(dependencies)];
+        return order;
     }
 
     visualize() {
-        const graph = {};
-        this.tasks.forEach((task, name) => {
-            graph[name] = [...task.dependencies];
-        });
-        return graph;
+        return Object.fromEntries(
+            [...this.tasks.entries()].map(([name, task]) => [
+                name,
+                [...task.dependencies]
+            ])
+        );
     }
 
     clear() {
@@ -90,4 +176,3 @@ class TaskRunner {
 }
 
 module.exports = TaskRunner;
-
