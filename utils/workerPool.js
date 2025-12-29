@@ -1,95 +1,123 @@
-// Worker thread pool (Node.js)
+// worker-pool.js
 const { Worker } = require('worker_threads');
 const path = require('path');
 const { cpus } = require('os');
+const { randomUUID } = require('crypto');
 
 class WorkerPool {
-    constructor(workerPath, size = cpus().length) {
+    constructor(workerPath, options = {}) {
         this.workerPath = path.resolve(workerPath);
-        this.size = size;
-        this.workers = [];
-        this.tasks = [];
-        this.availableWorkers = [];
+        this.size = options.size || cpus().length;
+        this.taskTimeout = options.taskTimeout || 0; // 0 = no timeout
 
-        this.initWorkers();
+        this.workers = new Set();
+        this.idleWorkers = [];
+        this.queue = [];
+        this.activeTasks = new Map();
+
+        this._init();
     }
 
-    initWorkers() {
+    _init() {
         for (let i = 0; i < this.size; i++) {
-            const worker = new Worker(this.workerPath);
-            worker.busy = false;
-            worker.id = i;
-
-            const markAvailable = () => {
-                worker.busy = false;
-                if (!this.availableWorkers.includes(worker)) {
-                    this.availableWorkers.push(worker);
-                }
-                this.processNextTask();
-            };
-
-            worker.on('message', markAvailable);
-            worker.on('error', error => {
-                console.error(`Worker ${i} error:`, error);
-                markAvailable();
-            });
-
-            this.workers.push(worker);
-            this.availableWorkers.push(worker);
+            this._spawnWorker();
         }
     }
 
-    async execute(taskData) {
+    _spawnWorker() {
+        const worker = new Worker(this.workerPath);
+
+        worker.on('message', msg => this._handleMessage(worker, msg));
+        worker.on('error', err => this._handleFailure(worker, err));
+        worker.on('exit', code => {
+            this.workers.delete(worker);
+            this._removeIdle(worker);
+            if (code !== 0) this._spawnWorker(); // auto-respawn
+        });
+
+        this.workers.add(worker);
+        this.idleWorkers.push(worker);
+    }
+
+    _handleMessage(worker, { id, result, error }) {
+        const task = this.activeTasks.get(id);
+        if (!task) return;
+
+        clearTimeout(task.timeout);
+        this.activeTasks.delete(id);
+
+        error ? task.reject(error) : task.resolve(result);
+        this._release(worker);
+    }
+
+    _handleFailure(worker, err) {
+        for (const [id, task] of this.activeTasks) {
+            if (task.worker === worker) {
+                task.reject(err);
+                clearTimeout(task.timeout);
+                this.activeTasks.delete(id);
+            }
+        }
+        this._removeIdle(worker);
+    }
+
+    _removeIdle(worker) {
+        this.idleWorkers = this.idleWorkers.filter(w => w !== worker);
+    }
+
+    _release(worker) {
+        this.idleWorkers.push(worker);
+        this._process();
+    }
+
+    execute(data, options = {}) {
         return new Promise((resolve, reject) => {
-            this.tasks.push({ taskData, resolve, reject });
-            this.processNextTask();
+            this.queue.push({
+                id: randomUUID(),
+                data,
+                resolve,
+                reject,
+                timeoutMs: options.timeout ?? this.taskTimeout
+            });
+            this._process();
         });
     }
 
-    processNextTask() {
-        if (this.tasks.length === 0 || this.availableWorkers.length === 0) {
-            return;
+    _process() {
+        while (this.queue.length && this.idleWorkers.length) {
+            const task = this.queue.shift();
+            const worker = this.idleWorkers.shift();
+
+            const payload = { id: task.id, data: task.data };
+
+            let timeout;
+            if (task.timeoutMs > 0) {
+                timeout = setTimeout(() => {
+                    this.activeTasks.delete(task.id);
+                    task.reject(new Error('Task timeout'));
+                    this._release(worker);
+                }, task.timeoutMs);
+            }
+
+            this.activeTasks.set(task.id, { ...task, worker, timeout });
+            worker.postMessage(payload);
         }
-
-        const task = this.tasks.shift();
-        const worker = this.availableWorkers.shift();
-        worker.busy = true;
-
-        const cleanup = () => {
-            worker.removeListener('message', onMessage);
-            worker.removeListener('error', onError);
-        };
-
-        const onMessage = result => {
-            cleanup();
-            task.resolve(result);
-            worker.emit('message', result);
-        };
-
-        const onError = error => {
-            cleanup();
-            task.reject(error);
-            worker.emit('error', error);
-        };
-
-        worker.once('message', onMessage);
-        worker.once('error', onError);
-        worker.postMessage(task.taskData);
     }
 
     async drain() {
-        while (this.tasks.length > 0 || this.workers.some(worker => worker.busy)) {
-            await new Promise(resolve => setTimeout(resolve, 100));
+        while (this.queue.length || this.activeTasks.size) {
+            await new Promise(r => setTimeout(r, 50));
         }
     }
 
-    terminate() {
-        this.workers.forEach(worker => worker.terminate());
-        this.workers = [];
-        this.availableWorkers = [];
-        this.tasks = [];
+    async terminate() {
+        await this.drain();
+        await Promise.all([...this.workers].map(w => w.terminate()));
+        this.workers.clear();
+        this.idleWorkers.length = 0;
+        this.queue.length = 0;
+        this.activeTasks.clear();
     }
 }
 
 module.exports = WorkerPool;
-
