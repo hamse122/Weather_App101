@@ -1,29 +1,49 @@
 /**
- * Modern Encryption Utility using Web Crypto API with PBKDF2 + AES-GCM
- * Strong security upgrade to your original version.
+ * Advanced Encryption Utility
+ * PBKDF2 + AES-256-GCM (Web Crypto API)
+ * Versioned, authenticated, hardened
  */
 
 export class Encryption {
 
-    // === Helper Functions ===
+    // ===== Constants =====
+    static VERSION = 1;
+    static SALT_LENGTH = 16;
+    static IV_LENGTH = 12;
+    static DEFAULT_ITERATIONS = 150_000;
+
+    // ===== Encoding Helpers =====
+    static encoder = new TextEncoder();
+    static decoder = new TextDecoder();
+
     static encode(data) {
-        return new TextEncoder().encode(data);
+        return this.encoder.encode(data);
     }
 
     static decode(data) {
-        return new TextDecoder().decode(data);
+        return this.decoder.decode(data);
     }
 
-    static toBase64(bytes) {
-        return btoa(String.fromCharCode(...bytes));
+    // Base64URL (RFC 4648 §5)
+    static toBase64Url(bytes) {
+        return btoa(String.fromCharCode(...bytes))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=+$/, "");
     }
 
-    static fromBase64(str) {
+    static fromBase64Url(str) {
+        str = str.replace(/-/g, "+").replace(/_/g, "/");
+        while (str.length % 4) str += "=";
         return Uint8Array.from(atob(str), c => c.charCodeAt(0));
     }
 
-    // === Secure PBKDF2 Key Derivation ===
-    static async deriveKey(password, salt, iterations = 100000) {
+    // ===== Key Derivation =====
+    static async deriveKey(password, salt, iterations) {
+        if (!password || !salt) {
+            throw new Error("Password and salt required");
+        }
+
         const baseKey = await crypto.subtle.importKey(
             "raw",
             this.encode(password),
@@ -35,9 +55,9 @@ export class Encryption {
         return crypto.subtle.deriveKey(
             {
                 name: "PBKDF2",
+                hash: "SHA-256",
                 salt,
-                iterations,
-                hash: "SHA-256"
+                iterations
             },
             baseKey,
             { name: "AES-GCM", length: 256 },
@@ -46,72 +66,94 @@ export class Encryption {
         );
     }
 
-    /**
-     * Encrypt data using password
-     */
-    static async encrypt(data, password) {
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const salt = crypto.getRandomValues(new Uint8Array(16));
+    // ===== Encryption =====
+    static async encrypt(plaintext, password, iterations = this.DEFAULT_ITERATIONS) {
+        const salt = crypto.getRandomValues(new Uint8Array(this.SALT_LENGTH));
+        const iv = crypto.getRandomValues(new Uint8Array(this.IV_LENGTH));
 
-        const key = await this.deriveKey(password, salt);
+        const key = await this.deriveKey(password, salt, iterations);
 
-        const encrypted = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv },
+        const aad = new Uint8Array([this.VERSION]); // authenticated metadata
+
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv, additionalData: aad },
             key,
-            this.encode(data)
+            this.encode(plaintext)
         );
 
-        const result = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
-        result.set(salt, 0);
-        result.set(iv, salt.length);
-        result.set(new Uint8Array(encrypted), salt.length + iv.length);
+        // Payload format:
+        // [version|iterations(4)|salt|iv|ciphertext]
+        const buffer = new Uint8Array(
+            1 + 4 + salt.length + iv.length + ciphertext.byteLength
+        );
 
-        return this.toBase64(result);
+        let offset = 0;
+        buffer[offset++] = this.VERSION;
+
+        new DataView(buffer.buffer).setUint32(offset, iterations);
+        offset += 4;
+
+        buffer.set(salt, offset); offset += salt.length;
+        buffer.set(iv, offset); offset += iv.length;
+        buffer.set(new Uint8Array(ciphertext), offset);
+
+        return this.toBase64Url(buffer);
     }
 
-    /**
-     * Decrypt data using password
-     */
-    static async decrypt(encryptedData, password) {
+    // ===== Decryption =====
+    static async decrypt(payload, password) {
         try {
-            const data = this.fromBase64(encryptedData);
+            const data = this.fromBase64Url(payload);
+            let offset = 0;
 
-            const salt = data.slice(0, 16);
-            const iv = data.slice(16, 16 + 12);
-            const encrypted = data.slice(28);
+            const version = data[offset++];
+            if (version !== this.VERSION) {
+                throw new Error("Unsupported encryption version");
+            }
 
-            const key = await this.deriveKey(password, salt);
+            const iterations = new DataView(data.buffer).getUint32(offset);
+            offset += 4;
 
-            const decrypted = await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv },
+            const salt = data.slice(offset, offset + this.SALT_LENGTH);
+            offset += this.SALT_LENGTH;
+
+            const iv = data.slice(offset, offset + this.IV_LENGTH);
+            offset += this.IV_LENGTH;
+
+            const ciphertext = data.slice(offset);
+
+            const key = await this.deriveKey(password, salt, iterations);
+
+            const plaintext = await crypto.subtle.decrypt(
+                {
+                    name: "AES-GCM",
+                    iv,
+                    additionalData: new Uint8Array([version])
+                },
                 key,
-                encrypted
+                ciphertext
             );
 
-            return this.decode(decrypted);
+            return this.decode(plaintext);
 
-        } catch (err) {
-            throw new Error("Decryption failed: Invalid password or corrupted data");
+        } catch {
+            throw new Error("Decryption failed (bad password or corrupted data)");
         }
     }
 
-    /**
-     * SHA-256 Hash (Hex)
-     */
-    static async hash(data) {
-        const hashBuffer = await crypto.subtle.digest(
+    // ===== Hashing =====
+    static async sha256(data) {
+        const hash = await crypto.subtle.digest(
             "SHA-256",
             this.encode(data)
         );
-        return [...new Uint8Array(hashBuffer)]
+        return [...new Uint8Array(hash)]
             .map(b => b.toString(16).padStart(2, "0"))
             .join("");
     }
 
-    /**
-     * Create HMAC-SHA256 signature
-     */
-    static async createHMAC(data, secret) {
+    // ===== HMAC =====
+    static async hmac(data, secret) {
         const key = await crypto.subtle.importKey(
             "raw",
             this.encode(secret),
@@ -120,32 +162,25 @@ export class Encryption {
             ["sign"]
         );
 
-        const signature = await crypto.subtle.sign(
-            "HMAC",
-            key,
-            this.encode(data)
-        );
-
-        return this.toBase64(new Uint8Array(signature));
+        const sig = await crypto.subtle.sign("HMAC", key, this.encode(data));
+        return this.toBase64Url(new Uint8Array(sig));
     }
 
-    /**
-     * Constant-time compare to prevent timing attacks
-     */
+    // ===== Constant-Time Compare (Bytes) =====
     static timingSafeEqual(a, b) {
         if (a.length !== b.length) return false;
-        let result = 0;
+        let diff = 0;
         for (let i = 0; i < a.length; i++) {
-            result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+            diff |= a[i] ^ b[i];
         }
-        return result === 0;
+        return diff === 0;
     }
 
-    /**
-     * Verify HMAC signature
-     */
     static async verifyHMAC(data, signature, secret) {
-        const expected = await this.createHMAC(data, secret);
-        return this.timingSafeEqual(expected, signature);
+        const expected = await this.hmac(data, secret);
+        return this.timingSafeEqual(
+            this.fromBase64Url(expected),
+            this.fromBase64Url(signature)
+        );
     }
 }
