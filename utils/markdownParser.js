@@ -1,129 +1,185 @@
 /**
- * Advanced Markdown Parser Utility
- * Improved safety, accuracy, and reversibility
+ * MarkdownParser v2
+ * - Safe
+ * - Reversible
+ * - Deterministic
+ * - Regex-minimized
  */
 
 export class MarkdownParser {
-    /**
-     * Parse markdown to HTML (safe, improved, supports more syntax)
-     * @param {string} markdown
-     * @returns {string}
-     */
+
+    // ==========================
+    // MARKDOWN → HTML
+    // ==========================
     static parse(markdown = "") {
-        let html = markdown;
-
-        // Escape unsafe HTML (basic XSS protection)
-        html = html
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-
-        // Restore markdown tags later
-        const restore = (str) =>
-            str.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-
-        // Fenced Code Blocks  ```js ... ```
-        html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
-            return `<pre><code class="lang-${lang || "text"}">${code.trim()}</code></pre>`;
-        });
-
-        // Inline code
-        html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-
-        // Headers
-        html = html.replace(/^### (.*)/gim, "<h3>$1</h3>");
-        html = html.replace(/^## (.*)/gim, "<h2>$1</h2>");
-        html = html.replace(/^# (.*)/gim, "<h1>$1</h1>");
-
-        // Horizontal Rule
-        html = html.replace(/^\s*(---|\*\*\*)\s*$/gim, "<hr/>");
-
-        // Bold & Italic (non-conflicting)
-        html = html.replace(/\*\*\*(.*?)\*\*\*/gim, "<strong><em>$1</em></strong>");
-        html = html.replace(/___(.*?)___/gim, "<strong><em>$1</em></strong>");
-
-        html = html.replace(/\*\*(.*?)\*\*/gim, "<strong>$1</strong>");
-        html = html.replace(/__(.*?)__/gim, "<strong>$1</strong>");
-
-        html = html.replace(/\*(.*?)\*/gim, "<em>$1</em>");
-        html = html.replace(/_(.*?)_/gim, "<em>$1</em>");
-
-        // Strikethrough
-        html = html.replace(/~~(.*?)~~/gim, "<del>$1</del>");
-
-        // Links
-        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, `<a href="$2">$1</a>`);
-
-        // Images
-        html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, `<img src="$2" alt="$1" />`);
-
-        // Blockquotes
-        html = html.replace(/^> (.*)$/gim, "<blockquote>$1</blockquote>");
-
-        // Ordered Lists
-        html = html.replace(/^\d+\. (.*)$/gim, "<ol><li>$1</li></ol>");
-        html = html.replace(/<\/ol>\s*<ol>/gim, ""); // merge sequences
-
-        // Unordered Lists
-        html = html.replace(/^[\*\-] (.*)$/gim, "<ul><li>$1</li></ul>");
-        html = html.replace(/<\/ul>\s*<ul>/gim, ""); // merge sequences
-
-        // Paragraphs (safe)
-        html = html.replace(/^(?!<(h\d|ul|ol|li|pre|blockquote|img|hr|code|a|strong|em)).+/gim, "<p>$&</p>");
-
-        return html.trim();
+        const tokens = this.#tokenize(markdown);
+        return this.#renderHTML(tokens);
     }
 
-    /**
-     * Convert HTML -> Markdown (reversible & safer)
-     * @param {string} html
-     * @returns {string}
-     */
+    // ==========================
+    // HTML → MARKDOWN
+    // ==========================
     static toMarkdown(html = "") {
         let md = html;
 
-        // Code blocks
-        md = md.replace(/<pre><code(?: class="lang-(.*?)")?>([\s\S]*?)<\/code><\/pre>/g,
-            (_, lang, code) => `\`\`\`${lang || ""}\n${code.trim()}\n\`\`\``);
+        md = md.replace(/<pre><code class="lang-(.*?)">([\s\S]*?)<\/code><\/pre>/g,
+            (_, l, c) => `\`\`\`${l}\n${this.#unescape(c)}\n\`\`\``);
 
-        // Inline code
         md = md.replace(/<code>(.*?)<\/code>/g, "`$1`");
 
-        // Headings
-        md = md.replace(/<h1>(.*?)<\/h1>/g, "# $1\n\n");
-        md = md.replace(/<h2>(.*?)<\/h2>/g, "## $1\n\n");
-        md = md.replace(/<h3>(.*?)<\/h3>/g, "### $1\n\n");
+        md = md.replace(/<h([1-6])>(.*?)<\/h\1>/g,
+            (_, l, t) => `${"#".repeat(+l)} ${t}\n\n`);
 
-        // HR
-        md = md.replace(/<hr\s*\/?>/g, "\n---\n");
-
-        // Bold & Italic
         md = md.replace(/<strong><em>(.*?)<\/em><\/strong>/g, "***$1***");
         md = md.replace(/<strong>(.*?)<\/strong>/g, "**$1**");
         md = md.replace(/<em>(.*?)<\/em>/g, "*$1*");
-
-        // Strikethrough
         md = md.replace(/<del>(.*?)<\/del>/g, "~~$1~~");
 
-        // Links
         md = md.replace(/<a href="([^"]+)">(.*?)<\/a>/g, "[$2]($1)");
+        md = md.replace(/<img src="([^"]+)" alt="([^"]*)" ?\/?>/g, "![$2]($1)");
 
-        // Images
-        md = md.replace(/<img src="([^"]+)" alt="([^"]*)" \/>/g, "![$2]($1)");
+        md = md.replace(/<blockquote>([\s\S]*?)<\/blockquote>/g,
+            (_, t) => t.split('\n').map(l => `> ${l}`).join('\n'));
 
-        // Blockquotes
-        md = md.replace(/<blockquote>(.*?)<\/blockquote>/g, "> $1");
+        md = md.replace(/<li>(.*?)<\/li>/g, "* $1\n");
+        md = md.replace(/<\/?(ul|ol)>/g, "");
 
-        // Lists
-        md = md.replace(/<ul>\s*<li>(.*?)<\/li>\s*<\/ul>/g, "* $1");
-        md = md.replace(/<ol>\s*<li>(.*?)<\/li>\s*<\/ol>/g, "1. $1");
-
-        // Paragraphs
+        md = md.replace(/<hr\s*\/?>/g, "\n---\n");
         md = md.replace(/<p>(.*?)<\/p>/g, "$1\n\n");
 
-        // Cleanup
-        md = md.replace(/\n{3,}/g, "\n\n");
+        return md.replace(/\n{3,}/g, "\n\n").trim();
+    }
 
-        return md.trim();
+    // ==========================
+    // TOKENIZER
+    // ==========================
+    static #tokenize(input) {
+        const lines = input.split('\n');
+        const tokens = [];
+        let inCode = false;
+        let buffer = [];
+
+        for (let line of lines) {
+            if (line.startsWith("```")) {
+                if (inCode) {
+                    tokens.push({ type: "code", content: buffer.join('\n') });
+                    buffer = [];
+                }
+                inCode = !inCode;
+                continue;
+            }
+
+            if (inCode) {
+                buffer.push(line);
+                continue;
+            }
+
+            if (/^#{1,6}\s/.test(line))
+                tokens.push({ type: "heading", level: line.match(/^#+/)[0].length, text: line.replace(/^#+\s/, "") });
+
+            else if (/^>\s?/.test(line))
+                tokens.push({ type: "quote", text: line.replace(/^>\s?/, "") });
+
+            else if (/^(\*|-)\s/.test(line))
+                tokens.push({ type: "ul", text: line.replace(/^(\*|-)\s/, "") });
+
+            else if (/^\d+\.\s/.test(line))
+                tokens.push({ type: "ol", text: line.replace(/^\d+\.\s/, "") });
+
+            else if (/^---$/.test(line))
+                tokens.push({ type: "hr" });
+
+            else if (line.trim())
+                tokens.push({ type: "paragraph", text: line });
+
+        }
+
+        return tokens;
+    }
+
+    // ==========================
+    // RENDER HTML
+    // ==========================
+    static #renderHTML(tokens) {
+        let html = "";
+        let listOpen = null;
+
+        for (const t of tokens) {
+            if (listOpen && t.type !== listOpen) {
+                html += `</${listOpen}>`;
+                listOpen = null;
+            }
+
+            switch (t.type) {
+                case "heading":
+                    html += `<h${t.level}>${this.#inline(t.text)}</h${t.level}>`;
+                    break;
+
+                case "paragraph":
+                    html += `<p>${this.#inline(t.text)}</p>`;
+                    break;
+
+                case "quote":
+                    html += `<blockquote>${this.#inline(t.text)}</blockquote>`;
+                    break;
+
+                case "ul":
+                    if (!listOpen) {
+                        html += "<ul>";
+                        listOpen = "ul";
+                    }
+                    html += `<li>${this.#inline(t.text)}</li>`;
+                    break;
+
+                case "ol":
+                    if (!listOpen) {
+                        html += "<ol>";
+                        listOpen = "ol";
+                    }
+                    html += `<li>${this.#inline(t.text)}</li>`;
+                    break;
+
+                case "code":
+                    html += `<pre><code>${this.#escape(t.content)}</code></pre>`;
+                    break;
+
+                case "hr":
+                    html += "<hr/>";
+            }
+        }
+
+        if (listOpen) html += `</${listOpen}>`;
+        return html;
+    }
+
+    // ==========================
+    // INLINE PARSER
+    // ==========================
+    static #inline(text) {
+        return this.#escape(text)
+            .replace(/\*\*\*(.*?)\*\*\*/g, "<strong><em>$1</em></strong>")
+            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+            .replace(/\*(.*?)\*/g, "<em>$1</em>")
+            .replace(/~~(.*?)~~/g, "<del>$1</del>")
+            .replace(/`([^`]+)`/g, "<code>$1</code>")
+            .replace(/!\[(.*?)\]\((.*?)\)/g, `<img src="$2" alt="$1"/>`)
+            .replace(/\[(.*?)\]\((.*?)\)/g, `<a href="$2">$1</a>`);
+    }
+
+    // ==========================
+    // ESCAPE
+    // ==========================
+    static #escape(str) {
+        return str
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+
+    static #unescape(str) {
+        return str
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&amp;/g, "&");
     }
 }
