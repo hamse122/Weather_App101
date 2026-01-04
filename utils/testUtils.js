@@ -1,122 +1,150 @@
-// Testing utilities for JavaScript
+/**
+ * Lightweight Test Framework (Jest-like)
+ * No dependencies, production-safe
+ */
+
 class TestUtils {
-    static assertEquals(actual, expected, message = '') {
+
+    // =====================
+    // ASSERTIONS
+    // =====================
+    static assertEquals(actual, expected, msg = "") {
         if (actual !== expected) {
-            throw new Error(`${message} - Expected: ${expected}, Got: ${actual}`);
+            throw new Error(`${msg} Expected: ${expected}, Got: ${actual}`);
         }
-        return true;
     }
-    
-    static assertNotEquals(actual, expected, message = '') {
+
+    static assertNotEquals(actual, expected, msg = "") {
         if (actual === expected) {
-            throw new Error(`${message} - Expected different values, Got: ${actual}`);
+            throw new Error(`${msg} Expected different values`);
         }
-        return true;
     }
-    
-    static assertTrue(condition, message = '') {
-        if (!condition) {
-            throw new Error(`${message} - Expected true, Got: ${condition}`);
+
+    static assertTrue(value, msg = "") {
+        if (value !== true) {
+            throw new Error(`${msg} Expected true, Got: ${value}`);
         }
-        return true;
     }
-    
-    static assertFalse(condition, message = '') {
-        if (condition) {
-            throw new Error(`${message} - Expected false, Got: ${condition}`);
+
+    static assertFalse(value, msg = "") {
+        if (value !== false) {
+            throw new Error(`${msg} Expected false, Got: ${value}`);
         }
-        return true;
     }
-    
-    static assertThrows(fn, errorType = Error, message = '') {
+
+    static assertDeepEquals(actual, expected, msg = "") {
+        const a = JSON.stringify(actual);
+        const e = JSON.stringify(expected);
+        if (a !== e) {
+            throw new Error(`${msg} Expected: ${e}, Got: ${a}`);
+        }
+    }
+
+    static assertThrows(fn, errorType = Error, msg = "") {
+        let threw = false;
         try {
             fn();
-            throw new Error(`${message} - Expected function to throw`);
-        } catch (error) {
-            if (!(error instanceof errorType)) {
-                throw new Error(`${message} - Expected ${errorType.name}, Got: ${error.constructor.name}`);
+        } catch (e) {
+            threw = true;
+            if (!(e instanceof errorType)) {
+                throw new Error(`${msg} Expected ${errorType.name}, Got ${e.constructor.name}`);
             }
         }
-        return true;
+        if (!threw) throw new Error(`${msg} Expected function to throw`);
     }
-    
-    static async assertResolves(promise, message = '') {
+
+    static async assertResolves(promise, msg = "") {
         try {
             await promise;
-            return true;
-        } catch (error) {
-            throw new Error(`${message} - Expected promise to resolve, Got: ${error.message}`);
+        } catch (e) {
+            throw new Error(`${msg} Expected resolve, Got reject`);
         }
     }
-    
-    static async assertRejects(promise, errorType = Error, message = '') {
+
+    static async assertRejects(promise, errorType = Error, msg = "") {
         try {
             await promise;
-            throw new Error(`${message} - Expected promise to reject`);
-        } catch (error) {
-            if (!(error instanceof errorType)) {
-                throw new Error(`${message} - Expected ${errorType.name}, Got: ${error.constructor.name}`);
+            throw new Error(`${msg} Expected reject`);
+        } catch (e) {
+            if (!(e instanceof errorType)) {
+                throw new Error(`${msg} Expected ${errorType.name}, Got ${e.constructor.name}`);
             }
         }
-        return true;
     }
-    
-    static describe(description, tests) {
-        console.log(`\n${description}`);
+
+    // =====================
+    // TEST RUNNER
+    // =====================
+    static describe(name, fn) {
+        console.log(`\n📦 ${name}`);
         try {
-            tests();
-            console.log('✅ All tests passed');
-        } catch (error) {
-            console.log('❌ Test failed:', error.message);
+            fn();
+        } catch {
+            // handled per-test
         }
     }
-    
-    static it(description, testFn) {
+
+    static async it(name, fn, timeout = 2000) {
+        const start = Date.now();
+
         try {
-            testFn();
-            console.log(`  ✅ ${description}`);
-        } catch (error) {
-            console.log(`  ❌ ${description}: ${error.message}`);
-            throw error;
+            const result = fn();
+            if (result instanceof Promise) {
+                await Promise.race([
+                    result,
+                    new Promise((_, r) =>
+                        setTimeout(() => r(new Error("Timeout exceeded")), timeout)
+                    )
+                ]);
+            }
+
+            console.log(`  ✅ ${name} (${Date.now() - start}ms)`);
+        } catch (e) {
+            console.error(`  ❌ ${name}`);
+            console.error(`     → ${e.message}`);
+            throw e;
         }
     }
 }
 
-// Mock utility
+/**
+ * Spy / Mock utility
+ */
 class Mock {
-    constructor() {
-        this.calls = [];
-        this.returnValues = new Map();
-    }
-    
-    fn(implementation = null) {
-        const mock = (...args) => {
-            this.calls.push({ args, timestamp: Date.now() });
-            
-            if (this.returnValues.has(args.length)) {
-                return this.returnValues.get(args.length);
-            }
-            
-            if (implementation) {
-                return implementation(...args);
-            }
-            
-            return undefined;
+
+    static fn(implementation = () => undefined) {
+        const calls = [];
+
+        const spy = (...args) => {
+            calls.push({
+                args,
+                result: implementation(...args),
+                timestamp: Date.now()
+            });
+            return calls[calls.length - 1].result;
         };
-        
-        mock.calls = this.calls;
-        mock.returnValue = (value) => {
-            this.returnValues.set(0, value);
-            return mock;
+
+        spy.calls = calls;
+
+        spy.called = () => calls.length > 0;
+        spy.callCount = () => calls.length;
+        spy.calledWith = (...args) =>
+            calls.some(c => JSON.stringify(c.args) === JSON.stringify(args));
+
+        spy.reset = () => calls.length = 0;
+
+        spy.mockImplementation = (fn) => {
+            implementation = fn;
+            return spy;
         };
-        mock.returnValueForArgs = (argsLength, value) => {
-            this.returnValues.set(argsLength, value);
-            return mock;
+
+        spy.mockReturnValue = (value) => {
+            implementation = () => value;
+            return spy;
         };
-        
-        return mock;
+
+        return spy;
     }
 }
 
 module.exports = { TestUtils, Mock };
-
