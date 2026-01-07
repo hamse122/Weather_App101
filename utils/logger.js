@@ -1,73 +1,76 @@
-// Advanced logging system
+/**
+ * Advanced Logger
+ * - Structured
+ * - Transport-based
+ * - Context-aware
+ * - Zero dependencies
+ */
+
 class Logger {
     constructor(options = {}) {
-        this.level = options.level || 'info';
         this.levels = {
             error: 0,
             warn: 1,
             info: 2,
-            debug: 3
+            debug: 3,
+            trace: 4
         };
-        this.transports = options.transports || [console];
+
+        this.level = options.level ?? 'info';
+        this.transports = options.transports ?? [];
         this.timestamps = options.timestamps !== false;
+        this.context = options.context || {};
+        this.silent = false;
     }
-    
-    log(level, message, meta = {}) {
-        if (this.levels[level] > this.levels[this.level]) return;
-        
-        const timestamp = this.timestamps ? new Date().toISOString() : '';
-        const logEntry = {
-            level,
-            message,
-            timestamp,
-            meta
-        };
-        
-        this.transports.forEach(transport => {
-            const method = transport[level] || transport.log || console.log;
-            method.call(transport, this.formatLogEntry(logEntry));
+
+    child(context = {}) {
+        return new Logger({
+            level: this.level,
+            transports: this.transports,
+            timestamps: this.timestamps,
+            context: { ...this.context, ...context }
         });
     }
-    
-    formatLogEntry(entry) {
-        return `[${entry.timestamp}] ${entry.level.toUpperCase()}: ${entry.message} ${
-            Object.keys(entry.meta).length ? JSON.stringify(entry.meta) : ''
-        }`.trim();
+
+    setLevel(level) {
+        this.level = level;
     }
-    
-    error(message, meta) {
-        this.log('error', message, meta);
+
+    mute(value = true) {
+        this.silent = value;
     }
-    
-    warn(message, meta) {
-        this.log('warn', message, meta);
+
+    log(level, message, meta = {}) {
+        if (this.silent) return;
+        if (this.levels[level] > this.levels[this.level]) return;
+
+        const entry = this.#createEntry(level, message, meta);
+
+        for (const transport of this.transports) {
+            if (this.levels[level] <= this.levels[transport.level ?? this.level]) {
+                transport.write(entry);
+            }
+        }
     }
-    
-    info(message, meta) {
-        this.log('info', message, meta);
+
+    #createEntry(level, message, meta) {
+        if (message instanceof Error) {
+            meta = { stack: message.stack, ...meta };
+            message = message.message;
+        }
+
+        return {
+            level,
+            message,
+            timestamp: this.timestamps ? new Date().toISOString() : undefined,
+            context: this.context,
+            meta
+        };
     }
-    
-    debug(message, meta) {
-        this.log('debug', message, meta);
-    }
-    
-    addTransport(transport) {
-        this.transports.push(transport);
-    }
+
+    error(msg, meta) { this.log('error', msg, meta); }
+    warn(msg, meta)  { this.log('warn', msg, meta); }
+    info(msg, meta)  { this.log('info', msg, meta); }
+    debug(msg, meta) { this.log('debug', msg, meta); }
+    trace(msg, meta) { this.log('trace', msg, meta); }
 }
-
-// File transport example (for Node.js)
-class FileTransport {
-    constructor(filename) {
-        this.filename = filename;
-        const fs = require('fs');
-        this.stream = fs.createWriteStream(filename, { flags: 'a' });
-    }
-    
-    log(message) {
-        this.stream.write(message + '\n');
-    }
-}
-
-module.exports = { Logger, FileTransport };
-
