@@ -1,96 +1,159 @@
-// Internationalization and localization system
+// Internationalization and localization system (v2)
 class I18n {
     constructor(options = {}) {
         this.defaultLocale = options.defaultLocale || 'en';
         this.currentLocale = this.defaultLocale;
+
         this.translations = new Map();
-        this.fallbacks = new Map();
+        this.fallbacks = new Map(); // locale -> [fallbacks]
         this.formatters = new Map();
         this.eventHandlers = new Map();
+
+        this.missingHandler =
+            options.onMissingTranslation ||
+            ((key, locale) => console.warn(`[i18n] Missing "${key}" for locale "${locale}"`));
+
         this.initFormatters();
     }
 
+    /* ------------------------------------------------------------------
+     * Translation management
+     * ------------------------------------------------------------------ */
+
     addTranslations(locale, translations) {
-        if (!this.translations.has(locale)) {
-            this.translations.set(locale, {});
-        }
-        const existing = this.translations.get(locale);
-        this.translations.set(locale, { ...existing, ...translations });
+        const existing = this.translations.get(locale) || {};
+        this.translations.set(locale, this.deepMerge(existing, translations));
         return this;
     }
 
-    t(key, variables = {}) {
-        let translation = this.getTranslation(key, this.currentLocale);
-
-        if (!translation && this.fallbacks.has(this.currentLocale)) {
-            const fallbackLocale = this.fallbacks.get(this.currentLocale);
-            translation = this.getTranslation(key, fallbackLocale);
-        }
-
-        if (!translation) {
-            translation = this.getTranslation(key, this.defaultLocale) || key;
-        }
-
-        return this.interpolate(translation, variables);
+    async loadTranslations(locale, loaderFn) {
+        const translations = await loaderFn(locale);
+        this.addTranslations(locale, translations);
+        this.dispatchEvent('translationsLoaded', { locale });
+        return this;
     }
 
-    getTranslation(key, locale) {
-        const localeTranslations = this.translations.get(locale);
-        if (!localeTranslations) {
-            return null;
-        }
-        return key.split('.').reduce((obj, k) => (obj ? obj[k] : null), localeTranslations);
+    getSupportedLocales() {
+        return Array.from(this.translations.keys());
     }
+
+    /* ------------------------------------------------------------------
+     * Locale handling
+     * ------------------------------------------------------------------ */
+
+    setLocale(locale) {
+        this.currentLocale = locale;
+        this.initFormatters();
+        this.dispatchEvent('localeChange', { locale });
+        return this;
+    }
+
+    setFallback(locale, fallbackLocales) {
+        this.fallbacks.set(
+            locale,
+            Array.isArray(fallbackLocales) ? fallbackLocales : [fallbackLocales]
+        );
+        return this;
+    }
+
+    /* ------------------------------------------------------------------
+     * Translation lookup
+     * ------------------------------------------------------------------ */
+
+    t(key, variables = {}, options = {}) {
+        const locales = this.getLocaleChain();
+        let value = null;
+
+        for (const locale of locales) {
+            value = this.getTranslation(key, locale, options.count);
+            if (value != null) break;
+        }
+
+        if (value == null) {
+            this.missingHandler(key, this.currentLocale);
+            return key;
+        }
+
+        return this.interpolate(value, variables);
+    }
+
+    getTranslation(key, locale, count) {
+        const dict = this.translations.get(locale);
+        if (!dict) return null;
+
+        let value = this.resolvePath(dict, key);
+
+        // Pluralization support
+        if (value && typeof value === 'object' && count != null) {
+            const rule = new Intl.PluralRules(locale).select(count);
+            value = value[rule] ?? value.other;
+        }
+
+        return value ?? null;
+    }
+
+    getLocaleChain() {
+        const chain = [this.currentLocale];
+
+        const fallbacks = this.fallbacks.get(this.currentLocale);
+        if (fallbacks) chain.push(...fallbacks);
+
+        if (!chain.includes(this.defaultLocale)) {
+            chain.push(this.defaultLocale);
+        }
+
+        return chain;
+    }
+
+    /* ------------------------------------------------------------------
+     * Interpolation
+     * ------------------------------------------------------------------ */
 
     interpolate(text, variables) {
-        if (typeof text !== 'string') {
-            return text;
-        }
-        return text.replace(/\{\{(\w+)\}\}/g, (match, token) => {
-            return Object.prototype.hasOwnProperty.call(variables, token) ? variables[token] : match;
+        if (typeof text !== 'string') return text;
+
+        return text.replace(/\{\{([\w.]+)\}\}/g, (_, path) => {
+            const value = this.resolvePath(variables, path);
+            return value != null ? value : `{{${path}}}`;
         });
     }
 
-    setLocale(locale) {
-        if (this.translations.has(locale)) {
-            this.currentLocale = locale;
-            this.dispatchEvent('localeChange', { locale });
-        }
-        return this;
-    }
-
-    setFallback(locale, fallbackLocale) {
-        this.fallbacks.set(locale, fallbackLocale);
-        return this;
-    }
+    /* ------------------------------------------------------------------
+     * Formatting
+     * ------------------------------------------------------------------ */
 
     formatNumber(number, options = {}) {
-        const formatter = this.getNumberFormatter(options);
-        return formatter.format(number);
-    }
-
-    formatDate(date, options = {}) {
-        const formatter = this.getDateFormatter(options);
-        return formatter.format(date);
+        return this.getNumberFormatter(options).format(number);
     }
 
     formatCurrency(amount, currency, options = {}) {
-        const formatter = this.getNumberFormatter({ style: 'currency', currency, ...options });
-        return formatter.format(amount);
+        return this.getNumberFormatter({
+            style: 'currency',
+            currency,
+            ...options
+        }).format(amount);
+    }
+
+    formatDate(date, options = {}) {
+        return this.getDateFormatter(options).format(date);
     }
 
     getNumberFormatter(options = {}) {
-        const key = JSON.stringify({ type: 'number', locale: this.currentLocale, options });
-        if (!this.formatters.has(key)) {
-            this.formatters.set(key, new Intl.NumberFormat(this.currentLocale, options));
-        }
-        return this.formatters.get(key);
+        return this.getFormatter('number', options, () =>
+            new Intl.NumberFormat(this.currentLocale, options)
+        );
     }
 
     getDateFormatter(options = {}) {
-        const key = JSON.stringify({ type: 'date', locale: this.currentLocale, options });
+        return this.getFormatter('date', options, () =>
+            new Intl.DateTimeFormat(this.currentLocale, options)
+        );
+    }
+
+    getFormatter(type, options, factory) {
+        const key = JSON.stringify({ type, locale: this.currentLocale, options });
         if (!this.formatters.has(key)) {
-            this.formatters.set(key, new Intl.DateTimeFormat(this.currentLocale, options));
+            this.formatters.set(key, factory());
         }
         return this.formatters.get(key);
     }
@@ -98,6 +161,10 @@ class I18n {
     initFormatters() {
         this.formatters.clear();
     }
+
+    /* ------------------------------------------------------------------
+     * Events
+     * ------------------------------------------------------------------ */
 
     on(event, callback) {
         if (!this.eventHandlers.has(event)) {
@@ -108,29 +175,41 @@ class I18n {
     }
 
     off(event, callback) {
-        const handlers = this.eventHandlers.get(event);
-        if (handlers) {
-            handlers.delete(callback);
-        }
+        this.eventHandlers.get(event)?.delete(callback);
     }
 
-    dispatchEvent(event, data) {
-        const handlers = this.eventHandlers.get(event);
-        if (handlers) {
-            handlers.forEach(handler => {
-                try {
-                    handler(data);
-                } catch (error) {
-                    console.error('I18n event handler error:', error);
-                }
-            });
-        }
+    dispatchEvent(event, payload) {
+        this.eventHandlers.get(event)?.forEach(handler => {
+            try {
+                handler(payload);
+            } catch (err) {
+                console.error(`[i18n] Event "${event}" error:`, err);
+            }
+        });
     }
 
-    getSupportedLocales() {
-        return Array.from(this.translations.keys());
+    /* ------------------------------------------------------------------
+     * Utilities
+     * ------------------------------------------------------------------ */
+
+    resolvePath(obj, path) {
+        return path.split('.').reduce((acc, key) => acc?.[key], obj);
+    }
+
+    deepMerge(target, source) {
+        for (const key of Object.keys(source)) {
+            if (
+                source[key] &&
+                typeof source[key] === 'object' &&
+                !Array.isArray(source[key])
+            ) {
+                target[key] = this.deepMerge(target[key] || {}, source[key]);
+            } else {
+                target[key] = source[key];
+            }
+        }
+        return target;
     }
 }
 
 module.exports = I18n;
-
