@@ -1,198 +1,235 @@
 /**
- * Advanced Notification System Utility
- * Includes queue logic, listener batching, pause/resume, duplicates filtering, 
- * extended configuration, and safer ID generation.
+ * Advanced Notification System v2
+ * Framework-agnostic (React / Vue / Vanilla)
  */
 
 export class NotificationSystem {
     constructor(options = {}) {
-        this.notifications = [];
-        this.listeners = [];
+        this.notifications = new Map();
+        this.listeners = new Set();
+        this.middlewares = [];
 
-        this.maxNotifications = options.maxNotifications || 10;
-        this.overflowStrategy = options.overflowStrategy || "fifo"; 
-        // fifo = remove oldest, lifo = remove newest
-        
-        this.allowDuplicates = options.allowDuplicates ?? true;
-        this.logHistory = options.logHistory ?? false;
-
-        this.history = [];
-
-        // Internal storage for active timers
-        this.timers = new Map();
-    }
-
-    /** Generate very strong unique ID */
-    static uid() {
-        return `${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`;
-    }
-
-    /**
-     * Add a notification
-     */
-    notify(notification) {
-        const notif = {
-            id: NotificationSystem.uid(),
-            type: notification.type || "info",
-            message: notification.message,
-            duration: notification.duration ?? 5000,
-            timestamp: new Date(),
-            meta: notification.meta || {},
-            ...notification,
+        this.options = {
+            maxNotifications: 10,
+            overflowStrategy: "fifo",
+            allowDuplicates: true,
+            duplicateStrategy: "ignore", // ignore | update | stack
+            logHistory: false,
+            perTypeLimit: {},
+            batching: true,
+            batchInterval: 16,
+            ...options
         };
 
-        // Prevent duplicates by message/type (optional)
-        if (!this.allowDuplicates) {
-            const exists = this.notifications.some(
-                (n) => n.message === notif.message && n.type === notif.type
-            );
-            if (exists) return null;
+        this.history = [];
+        this.timers = new Map();
+        this.paused = false;
+        this.batchQueue = [];
+    }
+
+    // =====================
+    // ID
+    // =====================
+    static uid() {
+        if (crypto?.randomUUID) return crypto.randomUUID();
+        return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    // =====================
+    // CORE
+    // =====================
+    notify(input) {
+        let notification = {
+            id: NotificationSystem.uid(),
+            type: "info",
+            priority: 0,
+            message: "",
+            duration: 5000,
+            meta: {},
+            createdAt: Date.now(),
+            remaining: null,
+            ...input
+        };
+
+        // Middleware
+        for (const mw of this.middlewares) {
+            notification = mw(notification) || notification;
         }
 
-        // Maintain queue size
-        if (this.notifications.length >= this.maxNotifications) {
-            if (this.overflowStrategy === "fifo") {
-                const removed = this.notifications.shift();
-                this._clearTimer(removed.id);
-            } else {
-                const removed = this.notifications.pop();
-                this._clearTimer(removed.id);
+        // Duplicate handling
+        if (!this.options.allowDuplicates) {
+            for (const n of this.notifications.values()) {
+                if (n.message === notification.message && n.type === notification.type) {
+                    if (this.options.duplicateStrategy === "update") {
+                        this.update(n.id, notification);
+                        return n.id;
+                    }
+                    return null;
+                }
             }
         }
 
-        this.notifications.push(notif);
+        this._enforceLimits(notification);
+        this.notifications.set(notification.id, notification);
 
-        // Save to history if enabled
-        if (this.logHistory) {
-            this.history.push(notif);
+        if (this.options.logHistory) {
+            this.history.push(notification);
         }
 
-        // Auto-dismiss timer
-        if (notif.duration > 0) {
-            const timer = setTimeout(() => this.remove(notif.id), notif.duration);
-            this.timers.set(notif.id, timer);
-        }
-
-        this._emit("add", notif);
-        return notif.id;
+        this._schedule(notification);
+        this._emit("add", notification);
+        return notification.id;
     }
 
-    /**
-     * Remove a notification by ID
-     */
+    update(id, patch) {
+        const n = this.notifications.get(id);
+        if (!n) return;
+
+        Object.assign(n, patch);
+        this._emit("update", n);
+    }
+
     remove(id) {
-        const index = this.notifications.findIndex((n) => n.id === id);
-        if (index > -1) {
-            const removed = this.notifications.splice(index, 1)[0];
-            this._clearTimer(id);
-            this._emit("remove", removed);
-        }
+        const n = this.notifications.get(id);
+        if (!n) return;
+
+        this._clearTimer(id);
+        this.notifications.delete(id);
+        this._emit("remove", n);
     }
 
-    /**
-     * Clear all notifications
-     */
     clear() {
-        this.notifications.forEach((n) => this._clearTimer(n.id));
-        this.notifications = [];
+        this.timers.forEach(t => clearTimeout(t));
+        this.timers.clear();
+        this.notifications.clear();
         this._emit("clear", null);
     }
 
-    /**
-     * Pause auto-dismiss timer
-     */
-    pause(id) {
-        const timer = this.timers.get(id);
-        if (timer) {
-            clearTimeout(timer);
-            this.timers.delete(id);
-            this._emit("pause", this.get(id));
+    // =====================
+    // TIMERS
+    // =====================
+    _schedule(n) {
+        if (n.duration <= 0 || this.paused) return;
+
+        n.remaining ??= n.duration;
+        const start = Date.now();
+
+        const timer = setTimeout(() => {
+            this.remove(n.id);
+        }, n.remaining);
+
+        n._startedAt = start;
+        this.timers.set(n.id, timer);
+    }
+
+    pause(id = null) {
+        if (id === null) {
+            this.paused = true;
+            this.notifications.forEach(n => this.pause(n.id));
+            return;
+        }
+
+        const n = this.notifications.get(id);
+        if (!n) return;
+
+        this._clearTimer(id);
+        n.remaining -= Date.now() - n._startedAt;
+        this._emit("pause", n);
+    }
+
+    resume(id = null) {
+        if (id === null) {
+            this.paused = false;
+            this.notifications.forEach(n => this.resume(n.id));
+            return;
+        }
+
+        const n = this.notifications.get(id);
+        if (!n || n.remaining <= 0) return;
+
+        this._schedule(n);
+        this._emit("resume", n);
+    }
+
+    _clearTimer(id) {
+        const t = this.timers.get(id);
+        if (t) clearTimeout(t);
+        this.timers.delete(id);
+    }
+
+    // =====================
+    // LIMITS
+    // =====================
+    _enforceLimits(newNotif) {
+        const max = this.options.maxNotifications;
+        if (this.notifications.size < max) return;
+
+        const sorted = [...this.notifications.values()]
+            .sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
+
+        const toRemove =
+            this.options.overflowStrategy === "lifo"
+                ? sorted.pop()
+                : sorted.shift();
+
+        this.remove(toRemove.id);
+    }
+
+    // =====================
+    // SUBSCRIPTIONS
+    // =====================
+    subscribe(fn, filter = null) {
+        const wrapped = (e) => (!filter || filter(e)) && fn(e);
+        this.listeners.add(wrapped);
+        return () => this.listeners.delete(wrapped);
+    }
+
+    use(middleware) {
+        this.middlewares.push(middleware);
+    }
+
+    _emit(type, notification) {
+        const payload = Object.freeze({
+            type,
+            notification,
+            notifications: [...this.notifications.values()],
+            timestamp: Date.now()
+        });
+
+        if (!this.options.batching) {
+            this.listeners.forEach(l => l(payload));
+            return;
+        }
+
+        this.batchQueue.push(payload);
+        if (this.batchQueue.length === 1) {
+            setTimeout(() => {
+                const batch = this.batchQueue.splice(0);
+                this.listeners.forEach(l => l(batch));
+            }, this.options.batchInterval);
         }
     }
 
-    /**
-     * Resume auto-dismiss timer
-     */
-    resume(id) {
-        const notif = this.get(id);
-        if (notif && notif.duration > 0 && !this.timers.has(id)) {
-            const timer = setTimeout(() => this.remove(id), notif.duration);
-            this.timers.set(id, timer);
-            this._emit("resume", notif);
-        }
-    }
-
-    /**
-     * Get notification by ID
-     */
+    // =====================
+    // GETTERS
+    // =====================
     get(id) {
-        return this.notifications.find((n) => n.id === id) || null;
+        return this.notifications.get(id) || null;
     }
 
-    /**
-     * Get all notifications
-     */
     getAll() {
-        return [...this.notifications];
+        return [...this.notifications.values()];
     }
 
-    /**
-     * Get log history (if enabled)
-     */
     getHistory() {
         return [...this.history];
     }
 
-    /**
-     * Subscribe to notification changes
-     */
-    subscribe(listener) {
-        this.listeners.push(listener);
-        return () => {
-            const idx = this.listeners.indexOf(listener);
-            if (idx > -1) this.listeners.splice(idx, 1);
-        };
-    }
-
-    /**
-     * Internal emit wrapper
-     */
-    _emit(action, notification) {
-        const payload = {
-            action,
-            notification,
-            notifications: this.getAll(),
-            timestamp: new Date(),
-        };
-
-        this.listeners.forEach((listener) => listener(payload));
-    }
-
-    /**
-     * Clear timer
-     */
-    _clearTimer(id) {
-        const timer = this.timers.get(id);
-        if (timer) {
-            clearTimeout(timer);
-            this.timers.delete(id);
-        }
-    }
-
-    /** Helper methods */
-    success(message, duration = 5000, meta = {}) {
-        return this.notify({ type: "success", message, duration, meta });
-    }
-
-    error(message, duration = 7000, meta = {}) {
-        return this.notify({ type: "error", message, duration, meta });
-    }
-
-    warning(message, duration = 6000, meta = {}) {
-        return this.notify({ type: "warning", message, duration, meta });
-    }
-
-    info(message, duration = 5000, meta = {}) {
-        return this.notify({ type: "info", message, duration, meta });
-    }
+    // =====================
+    // HELPERS
+    // =====================
+    success(msg, d, m) { return this.notify({ type: "success", message: msg, duration: d, meta: m }); }
+    error(msg, d, m)   { return this.notify({ type: "error", message: msg, duration: d, meta: m }); }
+    warning(msg, d, m) { return this.notify({ type: "warning", message: msg, duration: d, meta: m }); }
+    info(msg, d, m)    { return this.notify({ type: "info", message: msg, duration: d, meta: m }); }
 }
