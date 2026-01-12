@@ -1,204 +1,261 @@
 const EventEmitter = require('events');
 
 class BaseModel {
-    constructor(attributes = {}) {
+    constructor(attributes = {}, options = {}) {
+        this.$exists = !!options.exists;
+        this.$orm = options.orm;
+        this.$model = options.model;
         Object.assign(this, attributes);
     }
 
     toJSON() {
-        return { ...this };
+        const hidden = this.$model?.hidden || [];
+        return Object.fromEntries(
+            Object.entries(this).filter(([k]) => !hidden.includes(k) && !k.startsWith('$'))
+        );
+    }
+
+    async save(config = {}) {
+        if (!this.$exists) {
+            const created = await this.$model.create(this.toJSON(), config);
+            Object.assign(this, created);
+            this.$exists = true;
+            return this;
+        }
+        const updated = await this.$model.update(this[this.$model.primaryKey], this.toJSON(), config);
+        Object.assign(this, updated);
+        return this;
+    }
+
+    async destroy(config = {}) {
+        return this.$model.destroy(this[this.$model.primaryKey], config);
+    }
+
+    async reload(config = {}) {
+        const fresh = await this.$model.findById(this[this.$model.primaryKey], config);
+        Object.assign(this, fresh);
+        return this;
     }
 }
 
 class ORM extends EventEmitter {
     constructor(databaseManager, options = {}) {
         super();
-        this.databaseManager = databaseManager;
+        this.db = databaseManager;
         this.models = new Map();
         this.migrations = [];
+
         this.options = {
-            tablePrefix: options.tablePrefix || '',
-            timestampFields: options.timestampFields !== false
+            tablePrefix: '',
+            timestampFields: true,
+            paranoid: true,
+            ...options
         };
     }
 
-    // =======================
-    // MODEL DEFINITION
-    // =======================
-    defineModel(name, schema) {
-        const tableName = this.options.tablePrefix + (schema.tableName || `${name.toLowerCase()}s`);
-        const ModelClass = class extends BaseModel {};
-        ModelClass.modelName = name;
-        ModelClass.tableName = tableName;
-        ModelClass.schema = schema.fields || {};
-        ModelClass.relationships = schema.relationships || {};
-        ModelClass.primaryKey = schema.primaryKey || 'id';
-        ModelClass.softDelete = schema.softDelete || false;
-        ModelClass.orm = this;
-
-        this.attachModelMethods(ModelClass, schema);
-        this.models.set(name, ModelClass);
-        return ModelClass;
+    // =====================
+    // TRANSACTIONS
+    // =====================
+    async transaction(callback) {
+        return this.db.transaction(callback);
     }
 
-    // =======================
+    // =====================
+    // MODEL DEFINITION
+    // =====================
+    defineModel(name, schema) {
+        const orm = this;
+        const tableName = this.options.tablePrefix + (schema.tableName || `${name.toLowerCase()}s`);
+
+        class Model extends BaseModel {}
+
+        Object.assign(Model, {
+            modelName: name,
+            tableName,
+            schema: schema.fields || {},
+            relationships: schema.relationships || {},
+            primaryKey: schema.primaryKey || 'id',
+            softDelete: schema.softDelete ?? this.options.paranoid,
+            hidden: schema.hidden || [],
+            fillable: schema.fillable || null,
+            hooks: schema.hooks || {},
+            orm
+        });
+
+        this._attachModelMethods(Model);
+        this.models.set(name, Model);
+        return Model;
+    }
+
+    // =====================
     // MODEL METHODS
-    // =======================
-    attachModelMethods(ModelClass, schema) {
+    // =====================
+    _attachModelMethods(Model) {
         const orm = this;
 
+        const wrap = (row, exists = true) =>
+            row ? new Model(row, { exists, orm, model: Model }) : null;
+
         // CREATE
-        ModelClass.create = async (attributes = {}, config = {}) => {
-            if (ModelClass.hooks?.beforeCreate) await ModelClass.hooks.beforeCreate(attributes);
-
-            const now = new Date();
-            const data = this.options.timestampFields
-                ? { createdAt: now, updatedAt: now, ...attributes }
-                : attributes;
-
+        Model.create = async (attrs = {}, config = {}) => {
+            const data = this._prepareAttributes(Model, attrs, true);
             const fields = Object.keys(data);
             const values = Object.values(data);
-            const placeholders = fields.map((_, i) => `$${i + 1}`).join(', ');
 
-            const sql = `INSERT INTO ${ModelClass.tableName} (${fields.join(', ')}) VALUES (${placeholders}) RETURNING *`;
+            const sql = `
+                INSERT INTO ${Model.tableName}
+                (${fields.join(', ')})
+                VALUES (${fields.map((_, i) => `$${i + 1}`).join(', ')})
+                RETURNING *
+            `;
 
-            return this.databaseManager.query(async connection => {
-                const result = await connection.query(sql, values);
-                const instance = new ModelClass(result.rows[0]);
-                this.emit('created', { model: ModelClass.modelName, instance });
-                if (ModelClass.hooks?.afterCreate) await ModelClass.hooks.afterCreate(instance);
+            return orm.db.query(async conn => {
+                await Model.hooks?.beforeCreate?.(data);
+                const res = await conn.query(sql, values);
+                const instance = wrap(res.rows[0]);
+                orm.emit('created', { model: Model.modelName, instance });
+                await Model.hooks?.afterCreate?.(instance);
                 return instance;
             }, config);
         };
 
-        // FIND BY ID
-        ModelClass.findById = async (id, config = {}) => {
-            const pk = ModelClass.primaryKey;
-            const sql = `SELECT * FROM ${ModelClass.tableName} WHERE ${pk} = $1 LIMIT 1`;
+        // FIND
+        Model.findById = async (id, config = {}) => {
+            const where = [`${Model.primaryKey} = $1`];
+            if (Model.softDelete) where.push(`deletedAt IS NULL`);
 
-            return this.databaseManager.query(async connection => {
-                const result = await connection.query(sql, [id]);
-                return result.rows[0] ? new ModelClass(result.rows[0]) : null;
+            const sql = `
+                SELECT * FROM ${Model.tableName}
+                WHERE ${where.join(' AND ')}
+                LIMIT 1
+            `;
+
+            return orm.db.query(async c => {
+                const r = await c.query(sql, [id]);
+                return wrap(r.rows[0]);
             }, config);
         };
 
         // FIND ALL
-        ModelClass.findAll = async (options = {}, config = {}) => {
-            const builder = this.databaseManager.createQueryBuilder()
-                .select(options.fields || '*')
-                .from(ModelClass.tableName);
+        Model.findAll = async (opts = {}, config = {}) => {
+            const qb = orm.db.createQueryBuilder()
+                .select(opts.fields || '*')
+                .from(Model.tableName);
 
-            if (options.where) builder.where(options.where);
-            if (options.orderBy) {
-                const [field, direction] = options.orderBy.split(' ');
-                builder.orderBy(field, direction);
-            }
-            if (options.limit) builder.limit(options.limit);
-            if (options.offset) builder.offset(options.offset);
+            if (Model.softDelete) qb.where({ deletedAt: null });
+            if (opts.where) qb.where(opts.where);
+            if (opts.whereIn) qb.whereIn(opts.whereIn);
+            if (opts.orderBy) qb.orderBy(...opts.orderBy.split(' '));
+            if (opts.limit) qb.limit(opts.limit);
+            if (opts.offset) qb.offset(opts.offset);
 
-            const sql = builder.build();
-            return this.databaseManager.query(async connection => {
-                const rows = await connection.query(sql);
-                return rows.rows.map(r => new ModelClass(r));
+            const sql = qb.build();
+            return orm.db.query(async c => {
+                const r = await c.query(sql);
+                return r.rows.map(row => wrap(row));
             }, config);
         };
 
         // UPDATE
-        ModelClass.update = async (id, attributes = {}, config = {}) => {
-            const now = new Date();
-            const data = this.options.timestampFields
-                ? { ...attributes, updatedAt: now }
-                : attributes;
+        Model.update = async (id, attrs = {}, config = {}) => {
+            const data = this._prepareAttributes(Model, attrs);
+            if (!Object.keys(data).length) return null;
 
             const fields = Object.keys(data);
-            const values = Object.values(data);
-            const assignments = fields.map((f, i) => `${f} = $${i + 1}`).join(', ');
+            const sql = `
+                UPDATE ${Model.tableName}
+                SET ${fields.map((f, i) => `${f}=$${i + 1}`).join(', ')}
+                WHERE ${Model.primaryKey}=$${fields.length + 1}
+                RETURNING *
+            `;
 
-            const pkIndex = fields.length + 1;
-            const sql = `UPDATE ${ModelClass.tableName} SET ${assignments} WHERE ${ModelClass.primaryKey} = $${pkIndex} RETURNING *`;
-
-            return this.databaseManager.query(async connection => {
-                const result = await connection.query(sql, [...values, id]);
-                if (!result.rows[0]) return null;
-
-                const instance = new ModelClass(result.rows[0]);
-                this.emit('updated', { model: ModelClass.modelName, instance });
+            return orm.db.query(async c => {
+                const r = await c.query(sql, [...Object.values(data), id]);
+                const instance = wrap(r.rows[0]);
+                orm.emit('updated', { model: Model.modelName, instance });
                 return instance;
             }, config);
         };
 
+        // BULK CREATE
+        Model.bulkCreate = async (rows = [], config = {}) => {
+            return Promise.all(rows.map(r => Model.create(r, config)));
+        };
+
         // DESTROY
-        ModelClass.destroy = async (id, config = {}) => {
-            const pk = ModelClass.primaryKey;
-            let sql;
+        Model.destroy = async (id, config = {}) => {
+            const sql = Model.softDelete
+                ? `UPDATE ${Model.tableName} SET deletedAt=NOW() WHERE ${Model.primaryKey}=$1`
+                : `DELETE FROM ${Model.tableName} WHERE ${Model.primaryKey}=$1`;
 
-            if (ModelClass.softDelete) {
-                sql = `UPDATE ${ModelClass.tableName} SET deletedAt = NOW() WHERE ${pk} = $1`;
-            } else {
-                sql = `DELETE FROM ${ModelClass.tableName} WHERE ${pk} = $1`;
-            }
-
-            return this.databaseManager.query(async connection => {
-                await connection.query(sql, [id]);
-                this.emit('destroyed', { model: ModelClass.modelName, id });
+            return orm.db.query(async c => {
+                await c.query(sql, [id]);
+                orm.emit('destroyed', { model: Model.modelName, id });
                 return true;
             }, config);
         };
 
-        // RELATIONSHIP LOADER
-        ModelClass.with = function (...relations) {
-            return {
-                async load(instance, config = {}) {
-                    for (const relationName of relations) {
-                        const relation = ModelClass.relationships[relationName];
-                        if (!relation) throw new Error(`Relation ${relationName} not defined`);
+        // RELATIONS
+        Model.with = (...relations) => ({
+            async load(instance) {
+                for (const name of relations) {
+                    const rel = Model.relationships[name];
+                    const Related = orm.models.get(rel.model);
+                    if (!Related) continue;
 
-                        const RelatedModel = orm.models.get(relation.model);
-                        if (!RelatedModel) throw new Error(`Related model ${relation.model} not registered`);
-
-                        switch (relation.type) {
-                            case 'hasMany': {
-                                const sql = `SELECT * FROM ${RelatedModel.tableName} WHERE ${relation.foreignKey} = $1`;
-                                const result = await orm.databaseManager.query(async conn => conn.query(sql, [instance[relation.localKey || 'id']]), config);
-                                instance[relationName] = result.rows.map(r => new RelatedModel(r));
-                                break;
-                            }
-                            case 'belongsTo': {
-                                const sql = `SELECT * FROM ${RelatedModel.tableName} WHERE ${relation.localKey || 'id'} = $1 LIMIT 1`;
-                                const result = await orm.databaseManager.query(async conn => conn.query(sql, [instance[relation.foreignKey]]), config);
-                                instance[relationName] = result.rows[0] ? new RelatedModel(result.rows[0]) : null;
-                                break;
-                            }
-                            default:
-                                throw new Error(`Unsupported relation type: ${relation.type}`);
-                        }
+                    if (rel.type === 'hasMany') {
+                        instance[name] = await Related.findAll({
+                            where: { [rel.foreignKey]: instance[rel.localKey || 'id'] }
+                        });
                     }
-                    return instance;
+
+                    if (rel.type === 'belongsTo') {
+                        instance[name] = await Related.findById(instance[rel.foreignKey]);
+                    }
                 }
-            };
-        };
+                return instance;
+            }
+        });
     }
 
-    // =======================
-    // MIGRATIONS
-    // =======================
-    addMigration(migration) {
-        if (!migration || typeof migration.up !== 'function' || typeof migration.down !== 'function') {
-            throw new Error('Migration must implement up and down methods');
+    // =====================
+    // HELPERS
+    // =====================
+    _prepareAttributes(Model, attrs, isCreate = false) {
+        const now = new Date();
+        let data = { ...attrs };
+
+        if (Model.fillable) {
+            data = Object.fromEntries(
+                Object.entries(data).filter(([k]) => Model.fillable.includes(k))
+            );
         }
-        this.migrations.push(migration);
+
+        if (this.options.timestampFields) {
+            if (isCreate) data.createdAt = now;
+            data.updatedAt = now;
+        }
+
+        return data;
+    }
+
+    // =====================
+    // MIGRATIONS
+    // =====================
+    addMigration(m) {
+        this.migrations.push(m);
         return this;
     }
 
     async migrate(config = {}) {
-        for (const migration of this.migrations) {
-            await this.databaseManager.query(async connection => migration.up(connection), config);
+        for (const m of this.migrations) {
+            await this.db.query(c => m.up(c), config);
         }
     }
 
     async rollback(config = {}) {
-        for (const migration of [...this.migrations].reverse()) {
-            await this.databaseManager.query(async connection => migration.down(connection), config);
+        for (const m of [...this.migrations].reverse()) {
+            await this.db.query(c => m.down(c), config);
         }
     }
 }
