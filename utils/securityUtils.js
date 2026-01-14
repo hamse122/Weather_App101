@@ -1,32 +1,46 @@
 /**
  * Security Utilities
- * Provides safe, reusable helpers for handling common security operations
- * such as sanitization, hashing, token generation, and validation.
+ * Hardened helpers for sanitization, hashing, token generation,
+ * validation, and safe comparisons.
+ *
+ * Browser + Node.js compatible.
  */
 
+const cryptoAPI =
+    typeof crypto !== 'undefined'
+        ? crypto
+        : await import('node:crypto').then(m => m.webcrypto);
+
 export class SecurityUtils {
+    /* ----------------------------- SANITIZATION ----------------------------- */
+
     /**
      * Safely sanitize HTML content to prevent XSS.
-     * Converts HTML into plain text by escaping all tags.
-     * NOTE: For heavy sanitization, integrate DOMPurify.
+     * Escapes all HTML into plain text.
+     * NOTE: For rich HTML sanitization, use DOMPurify.
      *
-     * @param {string} html - The HTML string to sanitize.
-     * @returns {string} - Sanitized and safe HTML string.
+     * @param {unknown} html
+     * @returns {string}
      */
     static sanitizeHTML(html) {
+        if (typeof document === 'undefined') {
+            return SecurityUtils.escapeHTML(html);
+        }
+
         const wrapper = document.createElement('div');
-        wrapper.textContent = String(html);
+        wrapper.textContent = String(html ?? '');
         return wrapper.innerHTML;
     }
 
     /**
      * Escape HTML special characters.
      *
-     * @param {string} str - String to escape.
-     * @returns {string} - Escaped string safe for output.
+     * @param {unknown} str
+     * @returns {string}
      */
     static escapeHTML(str) {
-        if (!str) return '';
+        if (str == null) return '';
+
         const map = {
             '&': '&amp;',
             '<': '&lt;',
@@ -34,67 +48,98 @@ export class SecurityUtils {
             '"': '&quot;',
             "'": '&#039;',
         };
-        return String(str).replace(/[&<>"']/g, char => map[char]);
+
+        return String(str).replace(/[&<>"']/g, ch => map[ch]);
     }
+
+    /* ---------------------------- RANDOM HELPERS ----------------------------- */
 
     /**
      * Generate a cryptographically secure random token.
+     * Uses unbiased character selection.
      *
-     * @param {number} length - Token length.
-     * @returns {string} - Secure random token.
+     * @param {number} length
+     * @returns {string}
      */
     static generateToken(length = 32) {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-        const array = new Uint8Array(length);
-        crypto.getRandomValues(array);
+        const chars =
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        const max = chars.length;
+        const bytes = new Uint8Array(length);
+        cryptoAPI.getRandomValues(bytes);
 
-        return Array.from(array, v => chars[v % chars.length]).join('');
+        return Array.from(bytes, b => chars[b % max]).join('');
     }
 
     /**
-     * Generate a RFC4122 version 4 UUID using crypto API.
+     * Generate RFC4122 UUID v4.
      *
-     * @returns {string} - Random UUID (v4).
+     * @returns {string}
      */
     static generateUUID() {
-        if (crypto.randomUUID) {
-            return crypto.randomUUID();
+        if (cryptoAPI.randomUUID) {
+            return cryptoAPI.randomUUID();
         }
 
-        // Fallback for older browsers
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-            const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+            const r = cryptoAPI.getRandomValues(new Uint8Array(1))[0] & 15;
             const v = c === 'x' ? r : (r & 0x3) | 0x8;
             return v.toString(16);
         });
     }
 
+    /* ------------------------------- HASHING -------------------------------- */
+
     /**
-     * Hash a string using SHA-256 (crypto.subtle).
+     * Hash a string using SHA-256.
      *
-     * @param {string} str - Input string to hash.
-     * @returns {Promise<string>} - Hexadecimal hash string.
+     * @param {string} str
+     * @returns {Promise<string>}
      */
     static async hashSHA256(str) {
         const encoder = new TextEncoder();
-        const data = encoder.encode(str);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const bytes = new Uint8Array(hashBuffer);
+        const data = encoder.encode(String(str));
+        const hashBuffer = await cryptoAPI.subtle.digest('SHA-256', data);
 
-        return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        return [...new Uint8Array(hashBuffer)]
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
     }
 
     /**
-     * Validate a Content Security Policy header.
-     * Ensures that mandatory directives exist.
+     * Timing-safe string comparison.
      *
-     * @param {string} csp - CSP header string.
-     * @returns {boolean} - True if valid CSP format is detected.
+     * @param {string} a
+     * @param {string} b
+     * @returns {boolean}
+     */
+    static timingSafeEqual(a, b) {
+        if (a.length !== b.length) return false;
+
+        let diff = 0;
+        for (let i = 0; i < a.length; i++) {
+            diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+        }
+        return diff === 0;
+    }
+
+    /* --------------------------- CSP VALIDATION ------------------------------ */
+
+    /**
+     * Validate CSP header format and required directives.
+     *
+     * @param {string} csp
+     * @returns {boolean}
      */
     static validateCSP(csp) {
-        if (typeof csp !== 'string' || !csp.trim()) return false;
+        if (typeof csp !== 'string') return false;
 
-        const requiredDirectives = [
+        const directives = csp
+            .split(';')
+            .map(d => d.trim().split(/\s+/)[0])
+            .filter(Boolean);
+
+        const required = [
             'default-src',
             'script-src',
             'style-src',
@@ -102,37 +147,49 @@ export class SecurityUtils {
             'connect-src',
         ];
 
-        return requiredDirectives.every(dir => csp.includes(dir));
+        return required.every(d => directives.includes(d));
     }
 
+    /* ------------------------------ URL SAFETY ------------------------------- */
+
     /**
-     * Check if a URL is safe and does not use dangerous schemes.
+     * Validate URL safety and protocol.
      *
-     * @param {string} url - URL to validate.
-     * @returns {boolean} - True if safe.
+     * @param {string} url
+     * @returns {boolean}
      */
     static isSafeURL(url) {
         try {
-            const parsed = new URL(url);
-            const unsafeProtocols = ['javascript:', 'data:', 'vbscript:'];
+            const parsed = new URL(url, 'http://localhost');
 
-            return !unsafeProtocols.includes(parsed.protocol.toLowerCase());
+            const allowedProtocols = ['http:', 'https:'];
+            if (!allowedProtocols.includes(parsed.protocol)) return false;
+
+            // Prevent embedded JS execution
+            if (parsed.href.toLowerCase().includes('javascript:')) {
+                return false;
+            }
+
+            return true;
         } catch {
             return false;
         }
     }
 
+    /* ------------------------- PASSWORD VALIDATION --------------------------- */
+
     /**
-     * Validate password strength score based on security criteria.
+     * Validate password strength.
      *
-     * @param {string} password - Password to validate.
+     * @param {string} password
      * @returns {{
      *   strength: number,
      *   feedback: string[],
-     *   isStrong: boolean
+     *   isStrong: boolean,
+     *   entropyBits: number
      * }}
      */
-    static validatePasswordStrength(password) {
+    static validatePasswordStrength(password = '') {
         const feedback = [];
         let score = 0;
 
@@ -151,10 +208,23 @@ export class SecurityUtils {
         if (/[^a-zA-Z0-9]/.test(password)) score++;
         else feedback.push('Use at least one special character');
 
+        // Rough entropy estimate
+        const poolSize =
+            (/[a-z]/.test(password) ? 26 : 0) +
+            (/[A-Z]/.test(password) ? 26 : 0) +
+            (/[0-9]/.test(password) ? 10 : 0) +
+            (/[^a-zA-Z0-9]/.test(password) ? 32 : 0);
+
+        const entropyBits =
+            poolSize > 0
+                ? Math.round(password.length * Math.log2(poolSize))
+                : 0;
+
         return {
             strength: score,
             feedback,
             isStrong: score >= 4,
+            entropyBits,
         };
     }
 }
