@@ -1,85 +1,121 @@
-// Enhanced Command Bus with middleware pipeline
 class CommandBus {
-    constructor() {
+    constructor({ defaultTimeout = 0 } = {}) {
         this.handlers = new Map();
         this.middleware = [];
+        this.errorMiddleware = [];
+        this.defaultTimeout = defaultTimeout;
     }
 
-    // Register a handler for a specific command
-    register(commandName, handler) {
-        if (!commandName || typeof commandName !== "string") {
-            throw new Error("Command name must be a non-empty string");
-        }
+    // Resolve command name safely
+    static resolveCommandName(command) {
+        if (typeof command === "string") return command;
+        if (typeof command === "function") return command.name;
+        if (command?.constructor?.name) return command.constructor.name;
+        throw new Error("Invalid command identifier");
+    }
 
-        if (this.handlers.has(commandName)) {
-            throw new Error(`Handler for "${commandName}" is already registered`);
-        }
+    // Register handler
+    register(command, handler, { overwrite = false } = {}) {
+        const name = CommandBus.resolveCommandName(command);
 
         if (!handler || typeof handler.handle !== "function") {
-            throw new Error(`Handler for "${commandName}" must implement a handle(command) method`);
+            throw new Error(`Handler for "${name}" must implement handle(command, context)`);
         }
 
-        this.handlers.set(commandName, handler);
+        if (!overwrite && this.handlers.has(name)) {
+            throw new Error(`Handler for "${name}" already registered`);
+        }
+
+        this.handlers.set(name, handler);
         return this;
     }
 
-    // Add middleware to the pipeline
-    use(middleware) {
-        if (typeof middleware !== "function") {
-            throw new Error("Middleware must be a function: (command, next, context) => {}");
-        }
-
-        if (this.middleware.includes(middleware)) {
-            console.warn("Attempted to add duplicate middleware. Skipping.");
-            return this;
-        }
-
-        this.middleware.push(middleware);
+    unregister(command) {
+        const name = CommandBus.resolveCommandName(command);
+        this.handlers.delete(name);
         return this;
     }
 
-    // Execute a command through middleware -> handler pipeline
-    async execute(command) {
-        if (!command || !command.constructor?.name) {
-            throw new Error("Invalid command: must have a constructor with a name");
+    // Standard middleware
+    use(fn) {
+        if (typeof fn !== "function") {
+            throw new Error("Middleware must be a function");
         }
+        this.middleware.push(fn);
+        return this;
+    }
 
-        const commandName = command.constructor.name;
+    // Error middleware: (error, command, context) => {}
+    useError(fn) {
+        if (typeof fn !== "function") {
+            throw new Error("Error middleware must be a function");
+        }
+        this.errorMiddleware.push(fn);
+        return this;
+    }
+
+    // Compose middleware safely
+    compose(middleware, handler) {
+        return middleware.reduceRight(
+            (next, mw) => async (ctx) => mw(ctx.command, () => next(ctx), ctx),
+            async (ctx) => handler(ctx.command, ctx)
+        );
+    }
+
+    async execute(command, options = {}) {
+        const commandName = CommandBus.resolveCommandName(command);
         const handler = this.handlers.get(commandName);
 
         if (!handler) {
-            throw new Error(`No handler registered for command "${commandName}"`);
+            throw new Error(`No handler registered for "${commandName}"`);
         }
 
-        let index = 0;
-        const context = {}; // optional shared state for middleware
+        const {
+            timeout = this.defaultTimeout,
+            signal,
+            metadata = {}
+        } = options;
 
-        const next = async () => {
-            if (index < this.middleware.length) {
-                const middleware = this.middleware[index++];
-                try {
-                    return await middleware(command, next, context);
-                } catch (err) {
-                    console.error(`Middleware error in command "${commandName}":`, err);
-                    throw err;
-                }
-            }
-
-            try {
-                return await handler.handle(command, context);
-            } catch (err) {
-                console.error(`Handler error in "${commandName}":`, err);
-                throw err;
-            }
+        const context = {
+            commandName,
+            metadata,
+            startedAt: Date.now(),
+            aborted: false
         };
 
-        return await next();
-    }
+        if (signal) {
+            if (signal.aborted) throw new Error("Command aborted before execution");
+            signal.addEventListener("abort", () => {
+                context.aborted = true;
+            });
+        }
 
-    // Remove handler
-    unregister(commandName) {
-        this.handlers.delete(commandName);
-        return this;
+        const pipeline = this.compose(this.middleware, handler.handle.bind(handler));
+
+        const run = async () => {
+            const result = await pipeline({ command, ...context });
+            context.finishedAt = Date.now();
+            context.durationMs = context.finishedAt - context.startedAt;
+            context.result = result;
+            return result;
+        };
+
+        try {
+            if (timeout > 0) {
+                return await Promise.race([
+                    run(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error("Command timed out")), timeout)
+                    )
+                ]);
+            }
+            return await run();
+        } catch (err) {
+            for (const errorMw of this.errorMiddleware) {
+                await errorMw(err, command, context);
+            }
+            throw err;
+        }
     }
 }
 
