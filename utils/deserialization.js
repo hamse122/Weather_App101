@@ -1,197 +1,199 @@
 /**
- * Deserialization Utility
- * Enhanced version with safer parsing, better type handling,
- * Node.js compatibility, and extended features.
+ * Advanced Deserialization Utility
+ * Secure, extensible, Node & Browser compatible
  */
+
+const isNode =
+    typeof process !== "undefined" &&
+    process.versions &&
+    process.versions.node;
 
 export class Deserialization {
 
-    // --------------------------
-    // JSON PARSING
-    // --------------------------
+    // ==========================
+    // CORE JSON
+    // ==========================
 
-    /**
-     * Deserialize JSON string to object
-     */
-    static fromJSON(json) {
+    static fromJSON(json, reviver) {
+        if (typeof json !== "string") {
+            throw new TypeError("JSON input must be a string");
+        }
+
         try {
-            return JSON.parse(json);
-        } catch (error) {
-            throw new Error(`JSON deserialization failed: ${error.message}`);
+            return JSON.parse(json, reviver);
+        } catch (err) {
+            throw new Error(`JSON deserialization failed: ${err.message}`);
         }
     }
 
-    /**
-     * Safe JSON parse with fallback value
-     */
-    static safe(json, defaultValue = null) {
+    static safe(json, fallback = null) {
         try {
-            return JSON.parse(json);
+            return this.fromJSON(json);
         } catch {
-            return defaultValue;
+            return fallback;
         }
     }
 
-    /**
-     * Check whether text is valid JSON
-     */
-    static isJSON(text) {
+    static isJSON(value) {
+        if (typeof value !== "string") return false;
         try {
-            JSON.parse(text);
+            JSON.parse(value);
             return true;
         } catch {
             return false;
         }
     }
 
-    // --------------------------
-    // QUERY STRING PARSING
-    // --------------------------
+    // ==========================
+    // TYPE COERCION
+    // ==========================
 
-    /**
-     * Deserialize query string to object
-     */
-    static fromQueryString(queryString) {
-        const params = new URLSearchParams(queryString);
-        const obj = {};
+    static coerce(value) {
+        if (value === "true") return true;
+        if (value === "false") return false;
+        if (value === "null") return null;
+        if (value === "undefined") return undefined;
+        if (!isNaN(value) && value.trim() !== "") return Number(value);
+        return value;
+    }
 
-        for (const [key, value] of params.entries()) {
-            if (obj[key]) {
-                obj[key] = Array.isArray(obj[key]) ? [...obj[key], value] : [obj[key], value];
+    // ==========================
+    // QUERY STRING
+    // ==========================
+
+    static fromQueryString(query) {
+        const params = new URLSearchParams(query);
+        const result = Object.create(null);
+
+        for (const [key, raw] of params.entries()) {
+            const value = this.coerce(raw);
+
+            if (key in result) {
+                result[key] = Array.isArray(result[key])
+                    ? [...result[key], value]
+                    : [result[key], value];
             } else {
-                obj[key] = value;
+                result[key] = value;
             }
         }
 
-        return obj;
+        return result;
     }
 
-    // --------------------------
-    // FORMDATA PARSING
-    // --------------------------
+    // ==========================
+    // FORM DATA
+    // ==========================
 
-    /**
-     * Deserialize FormData into a JS object
-     * Supports files, arrays, and repeated keys
-     */
     static fromFormData(formData) {
-        const obj = {};
+        const result = Object.create(null);
 
         for (const [key, value] of formData.entries()) {
-            if (obj[key]) {
-                obj[key] = Array.isArray(obj[key]) ? [...obj[key], value] : [obj[key], value];
+            const val = value instanceof File ? value : this.coerce(value);
+
+            if (key in result) {
+                result[key] = Array.isArray(result[key])
+                    ? [...result[key], val]
+                    : [result[key], val];
             } else {
-                obj[key] = value instanceof File ? value : value;
+                result[key] = val;
             }
         }
 
-        return obj;
+        return result;
     }
 
-    // --------------------------
-    // JSON with REVIVER
-    // --------------------------
+    // ==========================
+    // BASE64 JSON
+    // ==========================
 
-    /**
-     * Deserialize JSON with a custom reviver
-     */
-    static withReviver(json, reviver) {
-        try {
-            return JSON.parse(json, reviver);
-        } catch (error) {
-            throw new Error(`Reviver deserialization failed: ${error.message}`);
-        }
-    }
-
-    // --------------------------
-    // BASE64 PARSING
-    // --------------------------
-
-    /**
-     * Base64 decode JSON with browser + Node support
-     */
     static fromBase64(base64) {
         try {
-            const decoded = (typeof atob === "function")
-                ? decodeURIComponent(escape(atob(base64)))
-                : Buffer.from(base64, "base64").toString("utf-8");
+            const decoded = isNode
+                ? Buffer.from(base64, "base64").toString("utf-8")
+                : new TextDecoder().decode(
+                      Uint8Array.from(atob(base64), c => c.charCodeAt(0))
+                  );
 
             return JSON.parse(decoded);
-        } catch (error) {
-            throw new Error(`Base64 deserialization failed: ${error.message}`);
+        } catch (err) {
+            throw new Error(`Base64 deserialization failed: ${err.message}`);
         }
     }
 
-    // --------------------------
-    // TYPE META RESTORATION
-    // --------------------------
+    // ==========================
+    // TYPE METADATA
+    // ==========================
 
-    /**
-     * Restore objects from JSON with type metadata
-     */
     static withTypeMetadata(json) {
-        return JSON.parse(json, (key, value) => {
-            if (value && typeof value === "object" && value.__type) {
-                switch (value.__type) {
-                    case "Date":
-                        return new Date(value.value);
+        return JSON.parse(json, (_, value) => {
+            if (!value || typeof value !== "object") return value;
 
-                    case "RegExp":
-                        return new RegExp(value.pattern, value.flags);
+            switch (value.__type) {
+                case "Date":
+                    return new Date(value.value);
 
-                    case "Map":
-                        return new Map(value.value);
+                case "RegExp":
+                    return new RegExp(value.pattern, value.flags);
 
-                    case "Set":
-                        return new Set(value.value);
+                case "Map":
+                    return new Map(value.value);
 
-                    case "Undefined":
-                        return undefined;
+                case "Set":
+                    return new Set(value.value);
 
-                    default:
-                        return value.value;
-                }
+                default:
+                    return value;
             }
-            return value;
         });
     }
 
-    // --------------------------
-    // URL PARSING
-    // --------------------------
+    // ==========================
+    // URL
+    // ==========================
 
-    /**
-     * Deserialize URL into structured components
-     */
-    static fromURL(url) {
+    static fromURL(input, base) {
         try {
-            const parsed = new URL(url);
+            const url = base ? new URL(input, base) : new URL(input);
 
             return {
-                protocol: parsed.protocol,
-                host: parsed.host,
-                pathname: parsed.pathname,
-                params: this.fromQueryString(parsed.search.slice(1)),
-                hash: parsed.hash.replace("#", "")
+                protocol: url.protocol,
+                origin: url.origin,
+                host: url.host,
+                pathname: url.pathname,
+                query: this.fromQueryString(url.search.slice(1)),
+                hash: url.hash.slice(1)
             };
-        } catch (error) {
-            throw new Error(`URL deserialization failed: ${error.message}`);
+        } catch (err) {
+            throw new Error(`URL deserialization failed: ${err.message}`);
         }
     }
 
-    // --------------------------
-    // OPTIONAL: YAML PARSING
-    // --------------------------
+    // ==========================
+    // YAML (NODE ONLY)
+    // ==========================
 
-    /**
-     * Deserialize YAML into JS object (requires js-yaml)
-     */
-    static fromYAML(yamlText) {
-        try {
-            const yaml = require("js-yaml"); // safe load in Node
-            return yaml.load(yamlText);
-        } catch (err) {
-            throw new Error("YAML deserialization failed. Install 'js-yaml' to use this feature.");
+    static fromYAML(text) {
+        if (!isNode) {
+            throw new Error("YAML parsing is only supported in Node.js");
         }
+
+        try {
+            const yaml = require("js-yaml");
+            return yaml.load(text);
+        } catch {
+            throw new Error("YAML deserialization failed. Install 'js-yaml'.");
+        }
+    }
+
+    // ==========================
+    // SCHEMA VALIDATION (OPTIONAL)
+    // ==========================
+
+    static withSchema(json, validator) {
+        const data = this.fromJSON(json);
+        if (!validator(data)) {
+            throw new Error("Schema validation failed");
+        }
+        return data;
     }
 }
