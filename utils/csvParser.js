@@ -1,97 +1,103 @@
 /**
- * Advanced CSV Parser Utility
- * Supports RFC 4180 quoting, escapes, type casting, flexible delimiters, and improved CSV generation.
+ * Ultra-robust CSV Parser (RFC 4180 compliant)
  */
 
 export class CSVParser {
-    /**
-     * Parse CSV text into structured data
-     * @param {string} csvText
-     * @param {Object} options
-     * @returns {{ headers: string[], data: Object[] }}
-     */
     static parse(csvText, options = {}) {
         const {
             delimiter = ",",
             hasHeaders = true,
-            ignoreEmpty = true,
             trim = true,
-            cast = false, // auto-detect types (numbers, booleans)
+            ignoreEmpty = true,
+            cast = false,
+            castMap = null,     // { columnName: fn }
+            comment = null,     // e.g. "#"
+            strict = false,     // throw on row length mismatch
         } = options;
 
-        // Normalize line endings
-        const lines = csvText
-            .replace(/\r\n/g, "\n")
-            .replace(/\r/g, "\n")
-            .split("\n");
+        if (!csvText) return { headers: [], data: [] };
 
-        const cleanLines = ignoreEmpty
-            ? lines.filter(line => line.trim().length > 0)
-            : lines;
+        const rows = this._parseRows(csvText, delimiter);
+        const filtered = rows.filter(r => {
+            if (ignoreEmpty && r.every(v => v === "")) return false;
+            if (comment && r[0]?.startsWith(comment)) return false;
+            return true;
+        });
 
-        if (cleanLines.length === 0) {
+        if (filtered.length === 0) {
             return { headers: [], data: [] };
         }
 
-        const headerLine = this.parseLine(cleanLines[0], delimiter, trim);
         const headers = hasHeaders
-            ? headerLine
-            : headerLine.map((_, i) => `Column${i + 1}`);
+            ? filtered.shift()
+            : filtered[0].map((_, i) => `Column${i + 1}`);
 
-        const startIndex = hasHeaders ? 1 : 0;
+        const data = filtered.map((row, rowIndex) => {
+            if (strict && row.length !== headers.length) {
+                throw new Error(
+                    `Row ${rowIndex + 1} length mismatch: expected ${headers.length}, got ${row.length}`
+                );
+            }
 
-        const data = [];
+            const obj = {};
+            headers.forEach((h, i) => {
+                let value = row[i] ?? "";
 
-        for (let i = startIndex; i < cleanLines.length; i++) {
-            const values = this.parseLine(cleanLines[i], delimiter, trim);
+                if (trim && typeof value === "string") value = value.trim();
 
-            const row = {};
-            headers.forEach((header, index) => {
-                let value = values[index] ?? "";
+                if (castMap?.[h]) {
+                    value = castMap[h](value);
+                } else if (cast) {
+                    value = this.castValue(value);
+                }
 
-                if (cast) value = this.castValue(value);
-
-                row[header] = value;
+                obj[h] = value;
             });
 
-            data.push(row);
-        }
+            return obj;
+        });
 
         return { headers, data };
     }
 
     /**
-     * Parse a single CSV line including escaped quotes and delimiter rules
+     * Streaming-safe RFC 4180 row parser
      */
-    static parseLine(line, delimiter = ",", trim = true) {
-        const result = [];
-        let current = "";
+    static _parseRows(text, delimiter) {
+        const rows = [];
+        let row = [];
+        let field = "";
         let inQuotes = false;
 
-        for (let i = 0; i < line.length; i++) {
-            const char = line[i];
-            const next = line[i + 1];
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            const next = text[i + 1];
 
             if (char === '"' && next === '"') {
-                // Escaped quote ("")
-                current += '"';
+                field += '"';
                 i++;
             } else if (char === '"') {
                 inQuotes = !inQuotes;
             } else if (char === delimiter && !inQuotes) {
-                result.push(trim ? current.trim() : current);
-                current = "";
-            } else {
-                current += char;
+                row.push(field);
+                field = "";
+            } else if (char === "\n" && !inQuotes) {
+                row.push(field);
+                rows.push(row);
+                row = [];
+                field = "";
+            } else if (char !== "\r") {
+                field += char;
             }
         }
 
-        result.push(trim ? current.trim() : current);
-        return result;
+        row.push(field);
+        rows.push(row);
+        return rows;
     }
 
     /**
-     * Auto-detect and cast values: number, boolean, null, or keep string
+     * Smart type casting
      */
     static castValue(value) {
         if (value === "") return "";
@@ -100,51 +106,53 @@ export class CSVParser {
             return value.toLowerCase() === "true";
         }
 
-        if (!isNaN(value) && value.trim() !== "") {
+        if (/^-?\d+(\.\d+)?$/.test(value)) {
             return Number(value);
         }
 
-        if (/^(null)$/i.test(value)) return null;
+        if (!isNaN(Date.parse(value))) {
+            return new Date(value);
+        }
+
+        if (/^null$/i.test(value)) return null;
 
         return value;
     }
 
     /**
-     * Escape CSV values properly
+     * Escape CSV values safely
      */
-    static escapeValue(value) {
+    static escapeValue(value, delimiter = ",") {
         if (value === null || value === undefined) return "";
 
         const str = String(value);
+        const needsQuotes = str.includes('"') || str.includes("\n") || str.includes(delimiter);
 
-        if (/[",\n]/.test(str)) {
-            return `"${str.replace(/"/g, '""')}"`;
-        }
-
-        return str;
+        return needsQuotes
+            ? `"${str.replace(/"/g, '""')}"`
+            : str;
     }
 
     /**
-     * Generate CSV text from data array
-     * @param {Array<Object>} data
-     * @param {Array<string>} headers
-     * @returns {string}
+     * Generate CSV text
      */
-    static generate(data, headers = null, delimiter = ",") {
-        if (!Array.isArray(data) || data.length === 0) {
-            return "";
-        }
+    static generate(data, {
+        headers = null,
+        delimiter = ",",
+        eol = "\n",
+        bom = false
+    } = {}) {
+        if (!Array.isArray(data) || data.length === 0) return "";
 
-        const actualHeaders = headers || Object.keys(data[0]);
+        const cols = headers || Object.keys(data[0]);
+        let csv = bom ? "\uFEFF" : "";
 
-        let csv = actualHeaders.map(h => this.escapeValue(h)).join(delimiter) + "\n";
+        csv += cols.map(h => this.escapeValue(h, delimiter)).join(delimiter) + eol;
 
         for (const row of data) {
-            const line = actualHeaders
-                .map(header => this.escapeValue(row[header] ?? ""))
-                .join(delimiter);
-
-            csv += line + "\n";
+            csv += cols
+                .map(h => this.escapeValue(row[h], delimiter))
+                .join(delimiter) + eol;
         }
 
         return csv;
