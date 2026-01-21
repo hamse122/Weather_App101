@@ -1,12 +1,12 @@
 /**
  * =====================================================
  * Performance Utilities – Upgraded (2025 Edition)
- * Debounce • Throttle • RAF Throttle • Advanced Controls
+ * Debounce • Throttle • RAF Throttle • Smart Rate Limit
  * =====================================================
  */
 
 /* ---------------------------------------
- * Debounce (Modern, Safe, Promise-aware)
+ * Debounce (Promise-aware, maxWait-safe)
  * ------------------------------------- */
 export function debounce(
   func,
@@ -22,7 +22,8 @@ export function debounce(
     throw new TypeError("Expected a function");
   }
 
-  let timeout = null;
+  let timeoutId;
+  let maxTimeoutId;
   let lastArgs;
   let lastThis;
   let lastInvokeTime = 0;
@@ -35,30 +36,21 @@ export function debounce(
     return result;
   };
 
-  const startTimer = (pending, delay) => {
-    timeout = setTimeout(pending, delay);
+  const startTimer = (fn, delay) => setTimeout(fn, delay);
+
+  const cancelTimers = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (maxTimeoutId) clearTimeout(maxTimeoutId);
+    timeoutId = maxTimeoutId = null;
   };
 
-  const shouldInvoke = (time) =>
-    lastInvokeTime === 0 ||
-    time - lastInvokeTime >= wait ||
-    (maxWait && time - lastInvokeTime >= maxWait);
-
-  const trailingEdge = (time) => {
-    timeout = null;
+  const trailingEdge = () => {
+    cancelTimers();
     if (trailing && lastArgs) {
-      return invoke(time);
+      return invoke(Date.now());
     }
     lastArgs = lastThis = null;
     return result;
-  };
-
-  const timerExpired = () => {
-    const now = Date.now();
-    if (shouldInvoke(now)) {
-      return trailingEdge(now);
-    }
-    startTimer(timerExpired, wait - (now - lastInvokeTime));
   };
 
   const debounced = function (...args) {
@@ -66,26 +58,35 @@ export function debounce(
     lastArgs = args;
     lastThis = this;
 
-    if (!timeout) {
-      if (leading) {
-        invoke(now);
+    const shouldCallNow = leading && !timeoutId;
+
+    if (!timeoutId) {
+      timeoutId = startTimer(trailingEdge, wait);
+
+      if (maxWait != null && !maxTimeoutId) {
+        maxTimeoutId = startTimer(() => {
+          if (timeoutId) trailingEdge();
+        }, maxWait);
       }
-      startTimer(timerExpired, wait);
+    }
+
+    if (shouldCallNow) {
+      return invoke(now);
     }
 
     return result;
   };
 
   debounced.cancel = () => {
-    if (timeout) clearTimeout(timeout);
-    timeout = lastArgs = lastThis = null;
+    cancelTimers();
+    lastArgs = lastThis = null;
   };
 
   debounced.flush = () => {
-    return timeout ? trailingEdge(Date.now()) : result;
+    return timeoutId ? trailingEdge() : result;
   };
 
-  debounced.pending = () => !!timeout;
+  debounced.pending = () => !!timeoutId;
 
   if (signal) {
     signal.addEventListener("abort", debounced.cancel, { once: true });
@@ -95,14 +96,14 @@ export function debounce(
 }
 
 /* ---------------------------------------
- * Throttle (Time-based)
+ * Throttle (Time-based, cancelable)
  * ------------------------------------- */
 export function throttle(
   func,
   wait = 0,
   { leading = true, trailing = true } = {}
 ) {
-  let timeout = null;
+  let timeoutId = null;
   let lastArgs;
   let lastThis;
   let lastCallTime = 0;
@@ -114,60 +115,94 @@ export function throttle(
   };
 
   const trailingEdge = () => {
-    timeout = null;
+    timeoutId = null;
     if (trailing && lastArgs) {
       invoke(Date.now());
     }
   };
 
-  return function throttled(...args) {
+  const throttled = function (...args) {
     const now = Date.now();
-    const remaining = wait - (now - lastCallTime);
+    if (!lastCallTime && !leading) {
+      lastCallTime = now;
+    }
 
+    const remaining = wait - (now - lastCallTime);
     lastArgs = args;
     lastThis = this;
 
     if (remaining <= 0) {
-      if (timeout) {
-        clearTimeout(timeout);
-        timeout = null;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
       }
       invoke(now);
-    } else if (!timeout && trailing) {
-      timeout = setTimeout(trailingEdge, remaining);
+    } else if (!timeoutId && trailing) {
+      timeoutId = setTimeout(trailingEdge, remaining);
     }
   };
+
+  throttled.cancel = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = lastArgs = lastThis = null;
+    lastCallTime = 0;
+  };
+
+  throttled.flush = () => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      trailingEdge();
+    }
+  };
+
+  return throttled;
 }
 
 /* ---------------------------------------
  * Throttle via requestAnimationFrame
- * (Perfect for scroll / resize / mousemove)
+ * (Scroll / resize / mousemove)
  * ------------------------------------- */
 export function throttleRAF(func) {
   let ticking = false;
   let lastArgs;
   let lastThis;
+  let rafId = null;
 
-  return function (...args) {
+  const invoke = () => {
+    ticking = false;
+    func.apply(lastThis, lastArgs);
+    lastArgs = lastThis = null;
+  };
+
+  const throttled = function (...args) {
     lastArgs = args;
     lastThis = this;
 
     if (!ticking) {
       ticking = true;
-      requestAnimationFrame(() => {
-        ticking = false;
-        func.apply(lastThis, lastArgs);
-      });
+      rafId = requestAnimationFrame(invoke);
     }
   };
+
+  throttled.cancel = () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    ticking = false;
+    rafId = lastArgs = lastThis = null;
+  };
+
+  return throttled;
 }
 
 /* ---------------------------------------
- * Combined Utility
- * Auto picks best strategy
+ * Smart Rate Limit
+ * Auto-picks best strategy
  * ------------------------------------- */
 export function smartRateLimit(func, wait = 0, opts = {}) {
-  if (wait === 0) return throttleRAF(func);
+  if (typeof func !== "function") {
+    throw new TypeError("Expected a function");
+  }
+
+  if (wait <= 0) return throttleRAF(func);
   if (opts.throttle) return throttle(func, wait, opts);
   return debounce(func, wait, opts);
 }
