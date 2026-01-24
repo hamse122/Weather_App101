@@ -1,79 +1,108 @@
-// Audit logger for tracking security-critical operations
+const crypto = require('crypto');
+
 class AuditLogger {
-    constructor(options = {}) {
-        this.transport = options.transport || this.createConsoleTransport();
-        this.maskFields = new Set(options.maskFields || ['password', 'token', 'apiKey']);
-        this.contextTransformers = [];
-        this.retention = options.retention || null;
-        this.records = [];
+  constructor(options = {}) {
+    this.transports = options.transports || [this.createConsoleTransport()];
+    this.maskFields = new Set(options.maskFields || ['password', 'token', 'apiKey']);
+    this.maskPaths = options.maskPaths || [];
+    this.contextTransformers = [];
+    this.retentionMs = options.retentionMs || null;
+    this.maxRecords = options.maxRecords || null;
+    this.secret = options.secret || null; // for hashing/signing
+    this.records = [];
+  }
+
+  addTransformer(transformer) {
+    this.contextTransformers.push(transformer);
+    return this;
+  }
+
+  async log(action, context = {}, meta = {}) {
+    const timestamp = new Date();
+
+    let safeContext = this.cloneAndMask(context);
+    for (const transformer of this.contextTransformers) {
+      safeContext = transformer(safeContext) || safeContext;
     }
 
-    addTransformer(transformer) {
-        this.contextTransformers.push(transformer);
-        return this;
+    const entry = Object.freeze({
+      id: crypto.randomUUID(),
+      action,
+      level: meta.level || 'INFO',
+      actor: meta.actor || null,
+      requestId: meta.requestId || null,
+      context: safeContext,
+      timestamp,
+      hash: this.secret ? this.sign(action, timestamp, safeContext) : null
+    });
+
+    this.records.push(entry);
+    this.enforceRetention();
+
+    await Promise.all(
+      this.transports.map(t => Promise.resolve(t(entry)))
+    );
+
+    return entry;
+  }
+
+  cloneAndMask(value, seen = new WeakMap(), path = '') {
+    if (value === null || typeof value !== 'object') return value;
+    if (seen.has(value)) return '[CIRCULAR]';
+
+    const output = Array.isArray(value) ? [] : {};
+    seen.set(value, output);
+
+    for (const key of Object.keys(value)) {
+      const currentPath = path ? `${path}.${key}` : key;
+
+      if (this.maskFields.has(key) || this.maskPaths.includes(currentPath)) {
+        output[key] = '[REDACTED]';
+      } else {
+        output[key] = this.cloneAndMask(value[key], seen, currentPath);
+      }
     }
 
-    log(action, context = {}) {
-        const timestamp = new Date();
-        let safeContext = this.maskSensitive(context);
-        for (const transformer of this.contextTransformers) {
-            safeContext = transformer(safeContext) || safeContext;
-        }
+    return output;
+  }
 
-        const entry = {
-            id: `${timestamp.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
-            action,
-            context: safeContext,
-            timestamp
-        };
+  sign(action, timestamp, context) {
+    return crypto
+      .createHmac('sha256', this.secret)
+      .update(action + timestamp.toISOString() + JSON.stringify(context))
+      .digest('hex');
+  }
 
-        this.records.push(entry);
-        this.enforceRetention();
-        this.transport(entry);
+  createConsoleTransport() {
+    return entry => {
+      console.info(`[AUDIT:${entry.level}] ${entry.action}`, {
+        id: entry.id,
+        actor: entry.actor,
+        requestId: entry.requestId,
+        timestamp: entry.timestamp.toISOString(),
+        context: entry.context
+      });
+    };
+  }
 
-        return entry;
+  enforceRetention() {
+    if (this.retentionMs) {
+      const cutoff = Date.now() - this.retentionMs;
+      this.records = this.records.filter(
+        r => r.timestamp.getTime() >= cutoff
+      );
     }
 
-    maskSensitive(context) {
-        if (!context || typeof context !== 'object') {
-            return context;
-        }
-        const copy = Array.isArray(context) ? [...context] : { ...context };
-        Object.keys(copy).forEach(key => {
-            if (this.maskFields.has(key)) {
-                copy[key] = '[REDACTED]';
-            } else if (copy[key] && typeof copy[key] === 'object') {
-                copy[key] = this.maskSensitive(copy[key]);
-            }
-        });
-        return copy;
+    if (this.maxRecords && this.records.length > this.maxRecords) {
+      this.records = this.records.slice(-this.maxRecords);
     }
+  }
 
-    createConsoleTransport() {
-        return entry => {
-            console.info(`[AUDIT] ${entry.action}`, {
-                timestamp: entry.timestamp.toISOString(),
-                context: entry.context
-            });
-        };
-    }
-
-    enforceRetention() {
-        if (!this.retention) {
-            return;
-        }
-        const cutoff = Date.now() - this.retention;
-        this.records = this.records.filter(record => record.timestamp.getTime() >= cutoff);
-    }
-
-    list({ limit = 100, filter = null } = {}) {
-        let entries = [...this.records];
-        if (filter) {
-            entries = entries.filter(filter);
-        }
-        return entries.slice(-limit);
-    }
+  list({ limit = 100, filter } = {}) {
+    let entries = [...this.records];
+    if (filter) entries = entries.filter(filter);
+    return entries.slice(-limit);
+  }
 }
 
 module.exports = AuditLogger;
-
