@@ -1,16 +1,29 @@
-// GraphQL resolver utilities
+// Advanced GraphQL Resolver Utility
 class GraphQLResolver {
-    constructor() {
-        this.resolvers = new Map();
-        this.directives = new Map();
-        this.middleware = [];
+    constructor(options = {}) {
+        this.resolvers = new Map();          // type -> field -> config
+        this.directives = new Map();         // name -> fn
+        this.globalMiddleware = [];
+
+        this.enableCache = options.cache ?? false;
+        this.cache = new Map();
+        this.onError = options.onError || null;
     }
 
-    addResolver(type, field, resolver) {
+    // -------------------------
+    // RESOLVERS
+    // -------------------------
+    addResolver(type, field, resolver, options = {}) {
         if (!this.resolvers.has(type)) {
             this.resolvers.set(type, new Map());
         }
-        this.resolvers.get(type).set(field, resolver);
+
+        this.resolvers.get(type).set(field, {
+            resolver,
+            middleware: options.middleware || [],
+            cache: options.cache ?? false
+        });
+
         return this;
     }
 
@@ -18,50 +31,116 @@ class GraphQLResolver {
         return this.resolvers.get(type)?.get(field);
     }
 
-    addDirective(name, directive) {
-        this.directives.set(name, directive);
+    // -------------------------
+    // MIDDLEWARE
+    // -------------------------
+    use(middleware) {
+        this.globalMiddleware.push(middleware);
         return this;
     }
 
-    use(middleware) {
-        this.middleware.push(middleware);
+    // -------------------------
+    // DIRECTIVES
+    // -------------------------
+    addDirective(name, directiveFn) {
+        this.directives.set(name, directiveFn);
         return this;
+    }
+
+    async applyDirectives(resolverFn, parent, args, ctx, info) {
+        const fieldDirectives = info?.fieldNodes?.[0]?.directives || [];
+
+        let fn = resolverFn;
+
+        for (const dir of fieldDirectives) {
+            const directive = this.directives.get(dir.name.value);
+            if (directive) {
+                fn = directive(fn, dir, ctx);
+            }
+        }
+
+        return fn(parent, args, ctx, info);
+    }
+
+    // -------------------------
+    // EXECUTION PIPELINE
+    // -------------------------
+    async executeMiddleware(stack, parent, args, ctx, info, resolverFn) {
+        let index = 0;
+
+        const next = async () => {
+            if (index < stack.length) {
+                return stack[index++](parent, args, ctx, info, next);
+            }
+            return resolverFn(parent, args, ctx, info);
+        };
+
+        return next();
     }
 
     async resolve(parent, args, context, info) {
         const { parentType, fieldName } = info;
-        const resolver = this.getResolver(parentType.name, fieldName);
+        const config = this.getResolver(parentType.name, fieldName);
 
-        if (!resolver) {
-            return parent ? parent[fieldName] : undefined;
+        if (!config) {
+            return parent?.[fieldName];
         }
 
-        let index = 0;
-        const next = async () => {
-            if (index < this.middleware.length) {
-                const middleware = this.middleware[index++];
-                return await middleware(parent, args, context, info, next);
-            }
-            return await resolver(parent, args, context, info);
-        };
+        const cacheKey = `${parentType.name}.${fieldName}:${JSON.stringify(args)}`;
 
-        return await next();
+        if (this.enableCache && config.cache && this.cache.has(cacheKey)) {
+            return this.cache.get(cacheKey);
+        }
+
+        try {
+            const resolverFn = async (p, a, c, i) =>
+                this.applyDirectives(config.resolver, p, a, c, i);
+
+            const result = await this.executeMiddleware(
+                [...this.globalMiddleware, ...config.middleware],
+                parent,
+                args,
+                context,
+                info,
+                resolverFn
+            );
+
+            if (this.enableCache && config.cache) {
+                this.cache.set(cacheKey, result);
+            }
+
+            return result;
+        } catch (error) {
+            if (this.onError) {
+                this.onError(error, { parent, args, context, info });
+            }
+            throw error;
+        }
     }
 
+    // -------------------------
+    // BUILD GRAPHQL RESOLVERS
+    // -------------------------
     buildResolvers() {
         const resolvers = {};
 
         for (const [typeName, fields] of this.resolvers) {
             resolvers[typeName] = {};
-            for (const [fieldName] of fields) {
-                resolvers[typeName][fieldName] = (parent, args, context, info) =>
-                    this.resolve(parent, args, context, info);
+            for (const fieldName of fields.keys()) {
+                resolvers[typeName][fieldName] = (parent, args, ctx, info) =>
+                    this.resolve(parent, args, ctx, info);
             }
         }
 
         return resolvers;
     }
+
+    // -------------------------
+    // UTILITIES
+    // -------------------------
+    clearCache() {
+        this.cache.clear();
+    }
 }
 
 module.exports = GraphQLResolver;
-
