@@ -1,170 +1,197 @@
-// CQRS pattern implementation
 class CQRS {
-    constructor() {
+    constructor({ logger = console } = {}) {
         this.commandHandlers = new Map();
         this.queryHandlers = new Map();
         this.eventHandlers = new Map();
+
         this.middlewares = {
             command: [],
             query: [],
             event: []
         };
+
+        this.hooks = {
+            beforeCommand: [],
+            afterCommand: [],
+            beforeQuery: [],
+            afterQuery: []
+        };
+
+        this.logger = logger;
     }
 
-    // Register middleware for commands, queries, or events
+    /* -------------------- Middleware -------------------- */
+
     registerMiddleware(type, middleware) {
         if (!this.middlewares[type]) {
-            throw new Error(`Invalid middleware type: ${type}. Must be 'command', 'query', or 'event'`);
-        }
-        if (typeof middleware !== 'function') {
-            throw new Error('Middleware must be a function');
+            throw new Error(`Invalid middleware type: ${type}`);
         }
         this.middlewares[type].push(middleware);
         return this;
     }
 
-    // Execute middlewares in sequence
-    async executeMiddlewares(type, data, context = {}) {
-        for (const middleware of this.middlewares[type]) {
-            await middleware(data, context);
-        }
+    async runMiddlewares(type, payload, context, finalHandler) {
+        const stack = this.middlewares[type];
+
+        let index = -1;
+        const dispatch = async (i) => {
+            if (i <= index) throw new Error('next() called multiple times');
+            index = i;
+            const fn = stack[i] || finalHandler;
+            if (!fn) return;
+            return fn(payload, context, () => dispatch(i + 1));
+        };
+
+        return dispatch(0);
     }
 
-    registerCommand(commandName, handler) {
-        if (!handler || typeof handler.execute !== 'function') {
-            throw new Error(`Command handler for ${commandName} must implement an execute method`);
-        }
-        this.commandHandlers.set(commandName, handler);
+    /* -------------------- Hooks -------------------- */
+
+    registerHook(type, fn) {
+        if (!this.hooks[type]) throw new Error(`Invalid hook: ${type}`);
+        this.hooks[type].push(fn);
         return this;
     }
 
-    async executeCommand(command, context = {}) {
-        const commandName = command.constructor?.name;
-        if (!commandName) {
-            throw new Error('Command must have a constructor with a name');
+    async runHooks(type, data, context) {
+        for (const hook of this.hooks[type]) {
+            await hook(data, context);
         }
-        
-        // Execute command middlewares
-        await this.executeMiddlewares('command', command, context);
-        
-        const handler = this.commandHandlers.get(commandName);
-        if (!handler) {
-            throw new Error(`No handler for command: ${commandName}`);
-        }
-        
-        console.log(`Executing command: ${commandName}`, command);
-        const result = await handler.execute(command);
-        console.log(`Command ${commandName} executed successfully`);
-        
-        return result;
     }
 
-    registerQuery(queryName, handler) {
-        if (!handler || typeof handler.handle !== 'function') {
-            throw new Error(`Query handler for ${queryName} must implement a handle method`);
+    /* -------------------- Commands -------------------- */
+
+    registerCommand(name, handler) {
+        if (typeof handler.execute !== 'function') {
+            throw new Error(`Command handler ${name} must implement execute()`);
         }
-        this.queryHandlers.set(queryName, handler);
+        this.commandHandlers.set(name, handler);
         return this;
     }
 
-    async executeQuery(query, context = {}) {
-        const queryName = query.constructor?.name;
-        if (!queryName) {
-            throw new Error('Query must have a constructor with a name');
-        }
-        
-        // Execute query middlewares
-        await this.executeMiddlewares('query', query, context);
-        
-        const handler = this.queryHandlers.get(queryName);
-        if (!handler) {
-            throw new Error(`No handler for query: ${queryName}`);
-        }
-        
-        console.log(`Executing query: ${queryName}`, query);
-        const result = await handler.handle(query);
-        console.log(`Query ${queryName} executed successfully`);
-        
+    async executeCommand(command, context = {}, options = {}) {
+        const name = command.constructor?.name;
+        const handler = this.commandHandlers.get(name);
+        if (!handler) throw new Error(`No handler for command: ${name}`);
+
+        await this.runHooks('beforeCommand', command, context);
+
+        const exec = async () =>
+            this.runMiddlewares('command', command, context, () =>
+                handler.execute(command, context)
+            );
+
+        const result = await this.withRetryAndTimeout(exec, options);
+
+        await this.runHooks('afterCommand', result, context);
         return result;
     }
 
-    registerEvent(eventName, handler) {
-        if (!handler || typeof handler.handle !== 'function') {
-            throw new Error(`Event handler for ${eventName} must implement a handle method`);
+    /* -------------------- Queries -------------------- */
+
+    registerQuery(name, handler) {
+        if (typeof handler.handle !== 'function') {
+            throw new Error(`Query handler ${name} must implement handle()`);
         }
-        if (!this.eventHandlers.has(eventName)) {
-            this.eventHandlers.set(eventName, []);
+        this.queryHandlers.set(name, handler);
+        return this;
+    }
+
+    async executeQuery(query, context = {}, options = {}) {
+        const name = query.constructor?.name;
+        const handler = this.queryHandlers.get(name);
+        if (!handler) throw new Error(`No handler for query: ${name}`);
+
+        await this.runHooks('beforeQuery', query, context);
+
+        const exec = async () =>
+            this.runMiddlewares('query', query, context, () =>
+                handler.handle(query, context)
+            );
+
+        const result = await this.withRetryAndTimeout(exec, options);
+
+        await this.runHooks('afterQuery', result, context);
+        return result;
+    }
+
+    /* -------------------- Events -------------------- */
+
+    registerEvent(name, handler, { once = false } = {}) {
+        if (typeof handler.handle !== 'function') {
+            throw new Error(`Event handler must implement handle()`);
         }
-        this.eventHandlers.get(eventName).push(handler);
+
+        if (!this.eventHandlers.has(name)) {
+            this.eventHandlers.set(name, []);
+        }
+
+        this.eventHandlers.get(name).push({ handler, once });
         return this;
     }
 
     async publishEvent(event, context = {}) {
-        const eventName = event.constructor?.name;
-        if (!eventName) {
-            throw new Error('Event must have a constructor with a name');
-        }
-        
-        // Execute event middlewares
-        await this.executeMiddlewares('event', event, context);
-        
-        const handlers = this.eventHandlers.get(eventName) || [];
-        const results = [];
+        const name = event.constructor?.name;
+        const handlers = this.eventHandlers.get(name) || [];
 
-        console.log(`Publishing event: ${eventName} to ${handlers.length} handlers`, event);
+        await this.runMiddlewares('event', event, context, async () => {
+            await Promise.all(
+                handlers.map(async (wrapper) => {
+                    try {
+                        await wrapper.handler.handle(event, context);
+                    } catch (err) {
+                        this.logger.error(`Event error (${name})`, err);
+                    }
+                })
+            );
+        });
 
-        for (const handler of handlers) {
-            try {
-                console.log(`Processing event ${eventName} with handler: ${handler.constructor?.name}`);
-                const result = await handler.handle(event);
-                results.push(result);
-                console.log(`Event ${eventName} handled successfully by ${handler.constructor?.name}`);
-            } catch (error) {
-                console.error(`Event handling error for ${eventName}:`, error);
-                // Optionally re-throw or continue based on requirements
-            }
-        }
-
-        console.log(`Event ${eventName} published to all handlers`);
-        return results;
+        this.eventHandlers.set(
+            name,
+            handlers.filter(h => !h.once)
+        );
     }
 
-    // Get statistics about registered handlers
-    getStats() {
-        return {
-            commands: this.commandHandlers.size,
-            queries: this.queryHandlers.size,
-            events: Array.from(this.eventHandlers.entries()).reduce((acc, [key, handlers]) => {
-                acc[key] = handlers.length;
-                return acc;
-            }, {}),
-            middlewares: {
-                command: this.middlewares.command.length,
-                query: this.middlewares.query.length,
-                event: this.middlewares.event.length
+    /* -------------------- Utilities -------------------- */
+
+    async withRetryAndTimeout(fn, { retries = 0, timeout } = {}) {
+        let attempt = 0;
+
+        const run = async () => {
+            attempt++;
+            try {
+                if (!timeout) return await fn();
+
+                return await Promise.race([
+                    fn(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Timeout exceeded')), timeout)
+                    )
+                ]);
+            } catch (err) {
+                if (attempt > retries) throw err;
+                return run();
             }
         };
+
+        return run();
     }
 
-    // Clear all handlers (useful for testing)
-    clear() {
+    unregisterAll() {
         this.commandHandlers.clear();
         this.queryHandlers.clear();
         this.eventHandlers.clear();
-        this.middlewares.command = [];
-        this.middlewares.query = [];
-        this.middlewares.event = [];
-        console.log('CQRS system cleared');
     }
 
-    // List all registered handlers
-    listHandlers() {
+    stats() {
         return {
-            commands: Array.from(this.commandHandlers.keys()),
-            queries: Array.from(this.queryHandlers.keys()),
-            events: Array.from(this.eventHandlers.keys())
+            commands: this.commandHandlers.size,
+            queries: this.queryHandlers.size,
+            events: [...this.eventHandlers.entries()]
+                .reduce((a, [k, v]) => ({ ...a, [k]: v.length }), {})
         };
     }
 }
 
 module.exports = CQRS;
+
