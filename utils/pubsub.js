@@ -1,75 +1,90 @@
 /**
- * Advanced Publish–Subscribe (PubSub) System
- * - Channels + wildcards
- * - Async subscribers
- * - History with size + TTL
- * - Replay support
- * - Middleware
- * - Pause / resume
+ * Advanced PubSub v2 (Upgraded)
+ * - Priority subscribers
+ * - Middleware pipeline (next)
+ * - Parallel / sequential publish
+ * - Dead-letter queue
+ * - Pattern cache
+ * - Global pause
  */
 
 class PubSub {
-    #channels = new Map();        // channel -> Set(sub)
-    #history = new Map();         // channel -> [{ data, timestamp }]
-    #paused = new Set();          // paused channels
-    #middleware = [];             // functions
+    #channels = new Map();
+    #history = new Map();
+    #paused = new Set();
+    #middleware = [];
+    #deadLetters = [];
+    #patternCache = new Map();
+    #globallyPaused = false;
 
     constructor({
         maxHistory = 100,
-        historyTTL = null // ms (e.g. 60000) or null
+        historyTTL = null,
+        parallel = true
     } = {}) {
         this.maxHistory = maxHistory;
         this.historyTTL = historyTTL;
+        this.parallel = parallel;
     }
 
     /* =========================
-       Middleware
+       Middleware (Koa-style)
     ========================== */
 
     use(fn) {
-        if (typeof fn === 'function') {
-            this.#middleware.push(fn);
+        if (typeof fn !== 'function') {
+            throw new Error('Middleware must be a function');
         }
+        this.#middleware.push(fn);
+    }
+
+    async #runMiddleware(ctx, final) {
+        let index = -1;
+        const dispatch = async i => {
+            if (i <= index) throw new Error('next() called twice');
+            index = i;
+            const fn = this.#middleware[i] || final;
+            if (!fn) return;
+            return fn(ctx, () => dispatch(i + 1));
+        };
+        return dispatch(0);
     }
 
     /* =========================
        Subscriptions
     ========================== */
 
-    subscribe(channel, callback, { replay = 0 } = {}) {
+    subscribe(channel, callback, { replay = 0, priority = 0 } = {}) {
         if (!this.#channels.has(channel)) {
             this.#channels.set(channel, new Set());
+            this.#patternCache.clear();
         }
 
-        const sub = { callback };
+        const sub = { callback, priority };
         this.#channels.get(channel).add(sub);
 
-        // Replay history
         if (replay > 0) {
             this.getHistory(channel, replay)
-                .forEach(msg =>
-                    callback(msg.data, channel, msg.timestamp)
-                );
+                .forEach(m => callback(m.data, channel, m.timestamp));
         }
 
-        // Return safe unsubscribe token
         return () => this.unsubscribe(channel, sub);
     }
 
-    once(channel, callback) {
-        const off = this.subscribe(channel, (data, ch, ts) => {
+    once(channel, callback, opts = {}) {
+        const off = this.subscribe(channel, (d, c, t) => {
             off();
-            callback(data, ch, ts);
-        });
+            callback(d, c, t);
+        }, opts);
     }
 
     unsubscribe(channel, sub) {
         const set = this.#channels.get(channel);
         if (!set) return;
-
         set.delete(sub);
-        if (set.size === 0) {
+        if (!set.size) {
             this.#channels.delete(channel);
+            this.#patternCache.clear();
         }
     }
 
@@ -78,31 +93,48 @@ class PubSub {
     ========================== */
 
     async publish(channel, data) {
-        if (this.#paused.has(channel)) return 0;
+        if (this.#globallyPaused || this.#paused.has(channel)) {
+            return { delivered: 0, blocked: true };
+        }
 
-        const message = { data, timestamp: Date.now() };
+        const message = {
+            channel,
+            data,
+            timestamp: Date.now()
+        };
 
         this.#storeHistory(channel, message);
 
-        // Run middleware
-        for (const mw of this.#middleware) {
-            const result = await mw(channel, message);
-            if (result === false) return 0;
-        }
+        const ctx = { message, cancelled: false };
 
-        const subs = this.#matchSubscribers(channel);
-        let count = 0;
+        const start = performance.now();
 
-        for (const sub of subs) {
-            try {
-                await sub.callback(data, channel, message.timestamp);
-                count++;
-            } catch (err) {
-                console.error(`[PubSub:${channel}]`, err);
+        await this.#runMiddleware(ctx, async () => {
+            const subs = this.#matchSubscribers(channel)
+                .sort((a, b) => b.priority - a.priority);
+
+            const execute = async sub => {
+                try {
+                    await sub.callback(data, channel, message.timestamp);
+                    return true;
+                } catch (err) {
+                    this.#deadLetters.push({ err, message });
+                    return false;
+                }
+            };
+
+            if (this.parallel) {
+                await Promise.all(subs.map(execute));
+            } else {
+                for (const s of subs) await execute(s);
             }
-        }
+        });
 
-        return count;
+        return {
+            delivered: this.getSubscriberCount(channel),
+            duration: performance.now() - start,
+            deadLetters: this.#deadLetters.length
+        };
     }
 
     /* =========================
@@ -110,20 +142,21 @@ class PubSub {
     ========================== */
 
     #storeHistory(channel, message) {
-        if (!this.#history.has(channel)) {
-            this.#history.set(channel, []);
+        let history = this.#history.get(channel);
+        if (!history) {
+            history = [];
+            this.#history.set(channel, history);
         }
 
-        const history = this.#history.get(channel);
         history.push(message);
 
-        if (history.length > this.maxHistory) {
+        while (history.length > this.maxHistory) {
             history.shift();
         }
 
         if (this.historyTTL) {
-            const now = Date.now();
-            while (history[0] && now - history[0].timestamp > this.historyTTL) {
+            const cutoff = Date.now() - this.historyTTL;
+            while (history[0]?.timestamp < cutoff) {
                 history.shift();
             }
         }
@@ -133,27 +166,27 @@ class PubSub {
         return (this.#history.get(channel) || []).slice(-limit);
     }
 
-    clearHistory(channel = null) {
-        channel ? this.#history.delete(channel) : this.#history.clear();
-    }
-
     /* =========================
-       Channel Control
+       Pause Control
     ========================== */
 
-    pause(channel) {
-        this.#paused.add(channel);
+    pause(channel = null) {
+        channel ? this.#paused.add(channel) : this.#globallyPaused = true;
     }
 
-    resume(channel) {
-        this.#paused.delete(channel);
+    resume(channel = null) {
+        channel ? this.#paused.delete(channel) : this.#globallyPaused = false;
     }
 
     /* =========================
-       Utilities
+       Matching (Cached)
     ========================== */
 
     #matchSubscribers(channel) {
+        if (this.#patternCache.has(channel)) {
+            return this.#patternCache.get(channel);
+        }
+
         const matched = new Set();
 
         for (const [key, subs] of this.#channels.entries()) {
@@ -165,25 +198,35 @@ class PubSub {
                 subs.forEach(s => matched.add(s));
             }
         }
-        return matched;
+
+        this.#patternCache.set(channel, [...matched]);
+        return [...matched];
     }
 
+    /* =========================
+       Utilities
+    ========================== */
+
     getSubscriberCount(channel = null) {
-        if (channel) {
-            return this.#channels.get(channel)?.size || 0;
-        }
-        return [...this.#channels.values()]
-            .reduce((n, s) => n + s.size, 0);
+        if (channel) return this.#channels.get(channel)?.size || 0;
+        return [...this.#channels.values()].reduce((n, s) => n + s.size, 0);
     }
 
     getChannels() {
         return [...this.#channels.keys()];
     }
 
+    getDeadLetters() {
+        return [...this.#deadLetters];
+    }
+
     reset() {
         this.#channels.clear();
         this.#history.clear();
         this.#paused.clear();
+        this.#deadLetters = [];
+        this.#patternCache.clear();
+        this.#globallyPaused = false;
     }
 }
 
