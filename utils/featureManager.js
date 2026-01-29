@@ -1,121 +1,140 @@
-// Upgraded Feature Manager with segmentation, async storage, analytics & A/B testing
-
-const murmurhash = require('murmurhash'); // npm install murmurhash
+const murmurhash = require('murmurhash');
 
 class FeatureManager {
     constructor(options = {}) {
         this.features = new Map();
         this.experiments = new Map();
+        this.segments = new Map();
 
         this.logger = options.logger || console;
-        this.storage = options.storage || null; // e.g., Redis, Mongo
+        this.storage = options.storage || null; // async: get/set
+        this.debug = options.debug || false;
+        this.killed = false;
     }
 
-    // Helper: Clone objects safely
+    /* ============================
+       Utilities
+    ============================ */
+
     _clone(obj) {
         return JSON.parse(JSON.stringify(obj));
     }
 
-    // ============================
-    // FEATURE DEFINITION
-    // ============================
+    _hash(key) {
+        return murmurhash.v3(String(key));
+    }
+
+    async _persist(key, value) {
+        if (this.storage?.set) {
+            await this.storage.set(key, value);
+        }
+    }
+
+    async _load(key) {
+        if (this.storage?.get) {
+            return this.storage.get(key);
+        }
+        return null;
+    }
+
+    /* ============================
+       Segments
+    ============================ */
+
+    defineSegment(name, fn) {
+        if (typeof fn !== 'function') {
+            throw new Error('Segment must be a function');
+        }
+        this.segments.set(name, fn);
+        return this;
+    }
+
+    /* ============================
+       Feature Definition
+    ============================ */
 
     defineFeature(name, config = {}) {
-        const featureConfig = {
+        const feature = {
             enabled: config.enabled ?? false,
             percentage: config.percentage ?? 100,
-            users: config.users || [],
-            groups: config.groups || [],
-            rules: config.rules || [],
-            priority: config.priority || 1, // Higher = stronger override
+            users: new Set(config.users || []),
+            groups: new Set(config.groups || []),
+            segments: new Set(config.segments || []),
+            rules: (config.rules || []).sort((a, b) => (b.priority || 0) - (a.priority || 0)),
+            startAt: config.startAt || null,
+            endAt: config.endAt || null,
+            priority: config.priority || 1,
+            killSwitch: false,
             metadata: config.metadata || {},
             createdAt: Date.now()
         };
 
-        this.features.set(name, featureConfig);
+        this.features.set(name, feature);
         this.logger.log(`[FeatureManager] Feature defined: ${name}`);
         return this;
     }
 
-    // Update feature properties safely
-    updateFeature(name, data = {}) {
-        if (!this.features.has(name)) {
-            throw new Error(`Feature '${name}' does not exist`);
-        }
+    updateFeature(name, patch = {}) {
         const feature = this.features.get(name);
-        Object.assign(feature, data);
+        if (!feature) throw new Error(`Feature '${name}' does not exist`);
+        Object.assign(feature, patch);
         return this;
     }
 
-    enable(name) {
-        return this.updateFeature(name, { enabled: true });
+    enable(name) { return this.updateFeature(name, { enabled: true }); }
+    disable(name) { return this.updateFeature(name, { enabled: false }); }
+
+    kill(name) { return this.updateFeature(name, { killSwitch: true }); }
+    revive(name) { return this.updateFeature(name, { killSwitch: false }); }
+
+    setPercentage(name, pct) {
+        return this.updateFeature(name, {
+            percentage: Math.max(0, Math.min(100, pct))
+        });
     }
 
-    disable(name) {
-        return this.updateFeature(name, { enabled: false });
-    }
-
-    enableForUsers(name, userIds) {
-        const feature = this.features.get(name);
-        if (feature) {
-            feature.users = Array.from(new Set([...feature.users, ...userIds]));
-        }
-        return this;
-    }
-
-    enableForGroups(name, groups) {
-        const feature = this.features.get(name);
-        if (feature) {
-            feature.groups = Array.from(new Set([...feature.groups, ...groups]));
-        }
-        return this;
-    }
-
-    setPercentage(name, percentage) {
-        const feature = this.features.get(name);
-        if (feature) {
-            feature.percentage = Math.max(0, Math.min(100, percentage));
-        }
-        return this;
-    }
-
-    // ============================
-    // EVALUATION LOGIC
-    // ============================
+    /* ============================
+       Evaluation
+    ============================ */
 
     isEnabled(name, context = {}) {
+        if (this.killed) return false;
+
         const feature = this.features.get(name);
-        if (!feature) return false;
+        if (!feature || feature.killSwitch) return false;
 
-        // High priority override
-        if (feature.priority > 1) {
-            return feature.enabled;
-        }
+        const now = Date.now();
+        if (feature.startAt && now < feature.startAt) return false;
+        if (feature.endAt && now > feature.endAt) return false;
 
+        if (feature.priority > 1) return feature.enabled;
         if (!feature.enabled) return false;
 
-        // User-level override
-        if (context.userId && feature.users.includes(context.userId)) {
+        if (context.userId && feature.users.has(context.userId)) {
             return true;
         }
 
-        // Group-based activation
-        if (context.groups && feature.groups.some(g => context.groups.includes(g))) {
+        if (
+            context.groups &&
+            [...feature.groups].some(g => context.groups.includes(g))
+        ) {
             return true;
         }
 
-        // Rule-based evaluation
+        for (const seg of feature.segments) {
+            const fn = this.segments.get(seg);
+            if (fn?.(context)) return true;
+        }
+
         for (const rule of feature.rules) {
-            if (typeof rule.condition === 'function' && rule.condition(context)) {
+            if (rule.condition?.(context)) {
                 return Boolean(rule.enabled);
             }
         }
 
-        // Percentage rollout
         if (feature.percentage < 100) {
-            const key = context.userId || JSON.stringify(context);
-            const hash = murmurhash.v3(key);
-            return (hash % 100) < feature.percentage;
+            const key = context.userId ?? JSON.stringify(context);
+            return (this._hash(key) % 100) < feature.percentage;
         }
 
         return true;
@@ -123,65 +142,91 @@ class FeatureManager {
 
     getFeatureStatus(name, context = {}) {
         const feature = this.features.get(name);
-        if (!feature) {
-            return { exists: false };
-        }
+        if (!feature) return { exists: false };
 
         return {
             exists: true,
-            enabled: feature.enabled,
             enabledForContext: this.isEnabled(name, context),
-            config: this._clone(feature)
+            config: this._clone({
+                ...feature,
+                users: [...feature.users],
+                groups: [...feature.groups],
+                segments: [...feature.segments]
+            })
         };
     }
 
-    // ============================
-    // A/B TESTING SYSTEM
-    // ============================
+    /* ============================
+       Experiments (A/B/n)
+    ============================ */
 
     createExperiment(name, variants, options = {}) {
         if (!Array.isArray(variants) || variants.length < 2) {
-            throw new Error('Experiment must have at least 2 variants');
+            throw new Error('Experiment must have >= 2 variants');
         }
 
+        const normalized = variants.map(v => ({
+            name: v.name,
+            weight: v.weight ?? 1
+        }));
+
         this.experiments.set(name, {
-            variants,
-            assignments: new Map(),
-            metadata: options.metadata || {},
-            createdAt: Date.now(),
-            analyticsHook: options.analyticsHook || null
+            variants: normalized,
+            exposures: new Set(),
+            analyticsHook: options.analyticsHook || null,
+            createdAt: Date.now()
         });
 
-        this.logger.log(`[FeatureManager] Experiment created: ${name}`);
         return this;
     }
 
     getVariant(experimentName, userId) {
-        const experiment = this.experiments.get(experimentName);
-        if (!experiment || !userId) return null;
+        const exp = this.experiments.get(experimentName);
+        if (!exp || !userId) return null;
 
-        // If user is already assigned, return
-        if (experiment.assignments.has(userId)) {
-            return experiment.assignments.get(userId);
+        const total = exp.variants.reduce((s, v) => s + v.weight, 0);
+        const hash = this._hash(userId) % total;
+
+        let acc = 0;
+        let chosen;
+
+        for (const v of exp.variants) {
+            acc += v.weight;
+            if (hash < acc) {
+                chosen = v.name;
+                break;
+            }
         }
 
-        // Stable hash for deterministic assignment
-        const hash = murmurhash.v3(userId);
-        const idx = hash % experiment.variants.length;
-        const variant = experiment.variants[idx];
-
-        experiment.assignments.set(userId, variant);
-
-        // Fire analytics event if provided
-        if (experiment.analyticsHook) {
-            experiment.analyticsHook({
+        if (!exp.exposures.has(userId)) {
+            exp.exposures.add(userId);
+            exp.analyticsHook?.({
                 experiment: experimentName,
                 userId,
-                variant
+                variant: chosen
             });
         }
 
-        return variant;
+        return chosen;
+    }
+
+    /* ============================
+       Global Controls
+    ============================ */
+
+    killAll() {
+        this.killed = true;
+    }
+
+    reviveAll() {
+        this.killed = false;
+    }
+
+    reset() {
+        this.features.clear();
+        this.experiments.clear();
+        this.segments.clear();
+        this.killed = false;
     }
 }
 
