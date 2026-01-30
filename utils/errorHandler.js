@@ -1,204 +1,207 @@
-/**
- * Enhanced Error Handler Utility
- * Advanced centralized error handling system with categorization, backoff,
- * async/sync wrapping, and extensible event-driven architecture.
- */
-
 export class EnhancedErrorHandler {
-    constructor() {
+    constructor(options = {}) {
         this.handlers = new Map();
-        this.logger = console.error;
         this.subscribers = new Set();
+        this.transports = new Set();
+
+        this.logger = options.logger || console.error;
         this.globalFallback = null;
+
+        this.rateLimit = {
+            capacity: 10,
+            tokens: 10,
+            refillMs: 1000,
+            lastRefill: Date.now()
+        };
+
+        this.circuitState = new Map(); // handlerName -> failures
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                                CONFIGURATION                               */
-    /* -------------------------------------------------------------------------- */
+    /* =========================
+       Configuration
+    ========================== */
 
-    /**
-     * Use custom logger
-     * @param {Function} logger
-     */
     setLogger(logger) {
         this.logger = logger;
     }
 
-    /**
-     * Set fallback handler when no handler matches
-     * @param {Function} handler
-     */
     setFallback(handler) {
         this.globalFallback = handler;
     }
 
-    /**
-     * Register specific error handler
-     * @param {string} type
-     * @param {Function} handler
-     */
-    registerHandler(type, handler) {
-        this.handlers.set(type, handler);
+    registerHandler(type, handler, { retries = 0, breaker = 5 } = {}) {
+        this.handlers.set(type, {
+            handler,
+            retries,
+            breaker
+        });
     }
 
-    /**
-     * Subscribe to all errors (observer pattern)
-     * @param {Function} subscriber
-     */
+    registerTransport(transportFn) {
+        this.transports.add(transportFn);
+    }
+
     onError(subscriber) {
         this.subscribers.add(subscriber);
-        return () => this.subscribers.delete(subscriber); // unsubscribe
+        return () => this.subscribers.delete(subscriber);
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                               ERROR HANDLING                               */
-    /* -------------------------------------------------------------------------- */
+    /* =========================
+       Core Handling
+    ========================== */
 
-    /**
-     * Handle error with logging + handler resolution
-     * @param {Error} error
-     * @param {Object} context
-     */
-    handle(error, context = {}) {
-        const errorType = error.type || error.constructor.name;
-        const handler = this.handlers.get(errorType) || this.handlers.get("default");
+    async handle(error, context = {}) {
+        const payload = this._buildPayload(error, context);
 
-        const payload = {
-            error: this.formatError(error),
-            context,
-            timestamp: new Date().toISOString()
-        };
+        if (!this._allowLog()) return null;
 
-        // Notify observers
-        this.subscribers.forEach(sub => sub(payload));
+        // Notify observers (async safe)
+        await Promise.allSettled(
+            [...this.subscribers].map(sub => sub(payload))
+        );
 
-        // Log error
-        if (this.logger) this.logger(payload);
+        // Send to transports
+        for (const transport of this.transports) {
+            try {
+                await transport(payload);
+            } catch (_) {}
+        }
 
-        // Run handler
-        if (handler) return handler(error, context);
+        // Log
+        this.logger(payload);
 
-        // Fallback
-        if (this.globalFallback) return this.globalFallback(error, context);
+        const entry =
+            this.handlers.get(payload.type) ||
+            this.handlers.get("default");
 
-        // Default: print to console
-        console.error("Unhandled error:", error);
-        return null;
+        if (!entry) {
+            return this.globalFallback?.(error, context);
+        }
+
+        return this._executeWithResilience(entry, error, context);
     }
 
-    /**
-     * Format error object in clean JSON
-     */
-    formatError(error) {
-        return {
-            name: error.name,
-            type: error.type || error.constructor.name,
-            message: error.message,
-            stack: error.stack,
-            context: error.context || null,
-            cause: error.originalError || null,
-            timestamp: error.timestamp || new Date().toISOString()
-        };
+    /* =========================
+       Resilience
+    ========================== */
+
+    async _executeWithResilience(entry, error, context) {
+        const name = error.type;
+        const state = this.circuitState.get(name) || { failures: 0 };
+
+        if (state.failures >= entry.breaker) {
+            return null; // circuit open
+        }
+
+        try {
+            return await this.retry(
+                () => entry.handler(error, context),
+                entry.retries
+            );
+        } catch (err) {
+            state.failures++;
+            this.circuitState.set(name, state);
+            throw err;
+        }
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                               FUNCTION WRAPPERS                             */
-    /* -------------------------------------------------------------------------- */
+    retry(fn, retries = 0, delay = 300) {
+        return new Promise(async (resolve, reject) => {
+            let last;
+            for (let i = 0; i <= retries; i++) {
+                try {
+                    return resolve(await fn());
+                } catch (e) {
+                    last = e;
+                    await new Promise(r =>
+                        setTimeout(r, delay * Math.pow(2, i))
+                    );
+                }
+            }
+            reject(last);
+        });
+    }
 
-    /**
-     * Wrap async or sync functions with error handling
-     * @param {Function} fn
-     * @param {Object} context
-     * @returns {Function}
-     */
+    /* =========================
+       Wrappers
+    ========================== */
+
     wrap(fn, context = {}) {
         return (...args) => {
             try {
                 const result = fn(...args);
-                // Handle async functions
                 if (result instanceof Promise) {
                     return result.catch(err =>
                         this.handle(err, { ...context, args })
                     );
                 }
                 return result;
-            } catch (error) {
-                return this.handle(error, { ...context, args });
+            } catch (err) {
+                return this.handle(err, { ...context, args });
             }
         };
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                              CUSTOM ERROR TYPES                             */
-    /* -------------------------------------------------------------------------- */
+    /* =========================
+       Error Creation
+    ========================== */
 
-    createError(message, context = {}, original = null, type = "GeneralError") {
-        const error = new Error(message);
-        error.type = type;
-        error.context = context;
-        error.originalError = original;
-        error.timestamp = new Date().toISOString();
-        return error;
+    createError(message, {
+        type = "GeneralError",
+        severity = "error",
+        domain = "app",
+        tags = {},
+        cause = null,
+        context = {}
+    } = {}) {
+        const err = new Error(message);
+        err.type = type;
+        err.severity = severity;
+        err.domain = domain;
+        err.tags = tags;
+        err.cause = cause;
+        err.context = context;
+        err.timestamp = new Date().toISOString();
+        err.traceId = crypto.randomUUID();
+        return err;
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                         RETRY WITH EXPONENTIAL BACKOFF                      */
-    /* -------------------------------------------------------------------------- */
+    /* =========================
+       Payload & Utilities
+    ========================== */
 
-    /**
-     * Retry function with exponential backoff
-     * @param {Function} fn - must return a Promise
-     * @param {number} retries
-     * @param {number} delay
-     */
-    async retry(fn, retries = 3, delay = 500) {
-        let lastError;
+    _buildPayload(error, context) {
+        return {
+            name: error.name,
+            type: error.type || error.constructor.name,
+            message: error.message,
+            severity: error.severity || "error",
+            domain: error.domain || "app",
+            tags: error.tags || {},
+            stack: error.stack,
+            traceId: error.traceId || crypto.randomUUID(),
+            context: { ...error.context, ...context },
+            timestamp: error.timestamp || new Date().toISOString()
+        };
+    }
 
-        for (let attempt = 1; attempt <= retries; attempt++) {
-            try {
-                return await fn();
-            } catch (err) {
-                lastError = err;
+    _allowLog() {
+        const now = Date.now();
+        const rl = this.rateLimit;
 
-                if (attempt < retries) {
-                    const backoff = delay * Math.pow(2, attempt - 1);
-                    await new Promise(res => setTimeout(res, backoff));
-                }
-            }
+        if (now - rl.lastRefill > rl.refillMs) {
+            rl.tokens = rl.capacity;
+            rl.lastRefill = now;
         }
 
-        throw lastError;
-    }
-
-    /* -------------------------------------------------------------------------- */
-    /*                               ERROR DEDUPLICATION                           */
-    /* -------------------------------------------------------------------------- */
-
-    /**
-     * Prevent same error from spamming logs (optional)
-     * @param {number} windowMs
-     */
-    enableDeduplication(windowMs = 5000) {
-        this.lastErrorHash = null;
-        this.lastTimestamp = 0;
-
-        this.setLogger((payload) => {
-            const hash = JSON.stringify(payload.error);
-            const now = Date.now();
-
-            if (hash === this.lastErrorHash && now - this.lastTimestamp < windowMs)
-                return; // Skip duplicate
-
-            this.lastErrorHash = hash;
-            this.lastTimestamp = now;
-
-            console.error(payload);
-        });
+        if (rl.tokens <= 0) return false;
+        rl.tokens--;
+        return true;
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/*                        EXPORT SINGLETON INSTANCE                           */
-/* -------------------------------------------------------------------------- */
+/* =========================
+   Singleton
+========================== */
 
 export const errorHandler = new EnhancedErrorHandler();
