@@ -1,103 +1,152 @@
 /**
- * Animation Utility Functions
- * Provides useful animation and timing functions
+ * Animation Utility Functions (Upgraded)
+ * Robust, cancelable, and production-ready
  */
 
+/* -------------------- Helpers -------------------- */
+
 /**
- * Linear interpolation between two values
- * @param {number} start - Start value
- * @param {number} end - End value
- * @param {number} t - Interpolation factor (0 to 1)
- * @returns {number}
+ * Clamp a number between min and max
+ */
+export function clamp(value, min = 0, max = 1) {
+  return Math.min(Math.max(value, min), max);
+}
+
+/**
+ * Linear interpolation
  */
 export function lerp(start, end, t) {
-  return start + (end - start) * t;
+  return start + (end - start) * clamp(t);
 }
 
 /**
- * Ease-in-out cubic function
- * @param {number} t - Input value (0 to 1)
- * @returns {number}
+ * requestAnimationFrame fallback
  */
-export function easeInOutCubic(t) {
-  return t < 0.5
-    ? 4 * t * t * t
-    : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
+const raf =
+  window.requestAnimationFrame ||
+  ((cb) => setTimeout(() => cb(performance.now()), 16));
+
+/* -------------------- Easing -------------------- */
+
+export const easing = {
+  linear: (t) => t,
+
+  easeInCubic: (t) => t * t * t,
+
+  easeOutCubic: (t) => 1 - Math.pow(1 - t, 3),
+
+  easeInOutCubic: (t) =>
+    t < 0.5
+      ? 4 * t * t * t
+      : 1 - Math.pow(-2 * t + 2, 3) / 2,
+};
+
+/* -------------------- Core Animation -------------------- */
 
 /**
- * Animate a value over time
- * @param {(value: number) => void} callback - Receives the current animated value
- * @param {number} start - Start value
- * @param {number} end - End value
- * @param {number} duration - Duration in ms
- * @param {(t: number) => number} easing - Easing function
- * @returns {Promise<void>}
+ * Animate a value over time (Cancelable)
  */
-export function animate(callback, start, end, duration, easing = (t) => t) {
-  return new Promise((resolve) => {
-    const startTime = performance.now();
+export function animate({
+  from,
+  to,
+  duration = 300,
+  easingFn = easing.linear,
+  onUpdate,
+  onComplete,
+}) {
+  let startTime = null;
+  let cancelled = false;
 
-    const loop = (now) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = easing(progress);
-      const currentValue = lerp(start, end, eased);
+  function loop(now) {
+    if (cancelled) return;
 
-      callback(currentValue);
+    if (!startTime) startTime = now;
 
-      if (progress < 1) {
-        requestAnimationFrame(loop);
-      } else {
-        resolve();
-      }
-    };
+    const elapsed = now - startTime;
+    const progress = clamp(elapsed / duration);
+    const eased = easingFn(progress);
+    const value = lerp(from, to, eased);
 
-    requestAnimationFrame(loop);
-  });
+    onUpdate?.(value);
+
+    if (progress < 1) {
+      raf(loop);
+    } else {
+      onComplete?.();
+    }
+  }
+
+  raf(loop);
+
+  return {
+    cancel() {
+      cancelled = true;
+    },
+  };
 }
 
+/* -------------------- DOM Animations -------------------- */
+
 /**
- * Fade in an element
- * @param {HTMLElement} element
- * @param {number} duration
- * @returns {Promise<void>}
+ * Fade in element
  */
 export function fadeIn(element, duration = 300) {
   if (!element) return Promise.resolve();
 
-  element.style.opacity = 0;
-  element.style.display = element.style.display || 'block';
-  
-  return animate(
-    (value) => {
-      element.style.opacity = value.toString();
-    },
-    0,
-    1,
-    duration,
-    easeInOutCubic
-  );
+  element.style.opacity = '0';
+  element.style.display ||= 'block';
+
+  return new Promise((resolve) => {
+    animate({
+      from: 0,
+      to: 1,
+      duration,
+      easingFn: easing.easeInOutCubic,
+      onUpdate: (v) => (element.style.opacity = v),
+      onComplete: resolve,
+    });
+  });
 }
 
 /**
- * Fade out an element
- * @param {HTMLElement} element
- * @param {number} duration
- * @returns {Promise<void>}
+ * Fade out element
  */
 export function fadeOut(element, duration = 300) {
   if (!element) return Promise.resolve();
 
-  return animate(
-    (value) => {
-      element.style.opacity = value.toString();
-    },
-    1,
-    0,
+  return new Promise((resolve) => {
+    animate({
+      from: 1,
+      to: 0,
+      duration,
+      easingFn: easing.easeInOutCubic,
+      onUpdate: (v) => (element.style.opacity = v),
+      onComplete: () => {
+        element.style.display = 'none';
+        resolve();
+      },
+    });
+  });
+}
+
+/**
+ * Slide Y animation (extra utility)
+ */
+export function slideY(element, from, to, duration = 300) {
+  if (!element) return;
+
+  element.style.willChange = 'transform';
+
+  return animate({
+    from,
+    to,
     duration,
-    easeInOutCubic
-  ).then(() => {
-    element.style.display = 'none';
+    easingFn: easing.easeOutCubic,
+    onUpdate: (v) => {
+      element.style.transform = `translateY(${v}px)`;
+    },
+    onComplete: () => {
+      element.style.willChange = 'auto';
+    },
   });
 }
