@@ -1,77 +1,104 @@
 /**
- * Retry Manager Utility
- * Retry manager for handling failed operations with exponential backoff
+ * Retry Manager Utility (Upgraded)
+ * Robust retry handling with backoff, jitter, timeout, and abort support
  */
 
-/**
- * RetryManager class for managing retry logic
- */
 export class RetryManager {
-    /**
-     * Execute a function with retry logic
-     * @param {Function} fn - Function to execute
-     * @param {Object} options - Retry options
-     * @returns {Promise} - Promise that resolves with function result
-     */
     static async execute(fn, options = {}) {
         const {
-            maxRetries = 3,
-            delay = 1000,
-            backoff = 'exponential',
+            retries = 3,
+            initialDelay = 1000,
+            maxDelay = 30_000,
+            backoff = 'exponential', // exponential | linear | fixed
             backoffMultiplier = 2,
+            jitter = true,
+            timeout = null, // ms per attempt
+            signal = null, // AbortSignal
             onRetry = null,
             shouldRetry = null
         } = options;
-        
+
+        let attempt = 0;
+        let delay = initialDelay;
         let lastError;
-        let currentDelay = delay;
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+
+        const abortIfNeeded = () => {
+            if (signal?.aborted) {
+                throw new DOMException('Retry aborted', 'AbortError');
+            }
+        };
+
+        while (attempt <= retries) {
+            abortIfNeeded();
+
             try {
-                return await fn();
+                return await this.withTimeout(fn, timeout);
             } catch (error) {
                 lastError = error;
-                
-                if (shouldRetry && !shouldRetry(error, attempt)) {
+
+                abortIfNeeded();
+
+                const retryAllowed = shouldRetry
+                    ? await shouldRetry(error, attempt)
+                    : true;
+
+                if (!retryAllowed || attempt === retries) {
                     throw error;
                 }
-                
-                if (attempt < maxRetries) {
-                    if (onRetry) {
-                        onRetry(error, attempt + 1, maxRetries);
-                    }
-                    
-                    await this.delay(currentDelay);
-                    
-                    if (backoff === 'exponential') {
-                        currentDelay *= backoffMultiplier;
-                    } else if (backoff === 'linear') {
-                        currentDelay += delay;
-                    }
+
+                const finalDelay = jitter
+                    ? this.applyJitter(delay)
+                    : delay;
+
+                onRetry?.({
+                    error,
+                    attempt: attempt + 1,
+                    retries,
+                    nextDelay: finalDelay
+                });
+
+                await this.sleep(finalDelay);
+
+                if (backoff === 'exponential') {
+                    delay *= backoffMultiplier;
+                } else if (backoff === 'linear') {
+                    delay += initialDelay;
                 }
+
+                delay = Math.min(delay, maxDelay);
+                attempt++;
             }
         }
-        
+
         throw lastError;
     }
-    
-    /**
-     * Delay execution
-     * @param {number} ms - Milliseconds to delay
-     * @returns {Promise} - Promise that resolves after delay
-     */
-    static delay(ms) {
+
+    static sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
-    
-    /**
-     * Create a retryable function
-     * @param {Function} fn - Function to make retryable
-     * @param {Object} options - Retry options
-     * @returns {Function} - Retryable function
-     */
+
+    static applyJitter(delay) {
+        const variance = delay * 0.3;
+        return delay - variance + Math.random() * variance * 2;
+    }
+
+    static async withTimeout(fn, timeout) {
+        if (!timeout) return fn();
+
+        return Promise.race([
+            fn(),
+            new Promise((_, reject) =>
+                setTimeout(
+                    () => reject(new Error('Retry attempt timed out')),
+                    timeout
+                )
+            )
+        ]);
+    }
+
     static createRetryable(fn, options = {}) {
-        return (...args) => this.execute(() => fn(...args), options);
+        return (...args) =>
+            RetryManager.execute(() => fn(...args), options);
     }
 }
 
@@ -79,11 +106,16 @@ export class RetryManager {
  * Retryable decorator for class methods
  */
 export function retryable(options = {}) {
-    return function(target, propertyKey, descriptor) {
-        const originalMethod = descriptor.value;
-        descriptor.value = function(...args) {
-            return RetryManager.execute(() => originalMethod.apply(this, args), options);
+    return function (target, propertyKey, descriptor) {
+        const original = descriptor.value;
+
+        descriptor.value = function (...args) {
+            return RetryManager.execute(
+                () => original.apply(this, args),
+                options
+            );
         };
+
         return descriptor;
     };
 }
