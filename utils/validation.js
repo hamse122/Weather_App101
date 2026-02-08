@@ -1,86 +1,156 @@
 /**
- * Validation Utility Functions
- * Provides useful validation functions for common data types
+ * Advanced Validation Utility Functions
+ * Robust, configurable validators for modern applications
  */
 
-/**
- * Validate an email address
- * @param {string} email - The email to validate
- * @returns {boolean} - True if valid email
- */
+/* ---------------------------------- */
+/* Email Validation */
+/* ---------------------------------- */
 export function isValidEmail(email) {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+  if (typeof email !== 'string') return false;
+
+  // RFC 5322-inspired (practical, not insane)
+  const emailRegex =
+    /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/;
+
+  return emailRegex.test(email.trim());
 }
 
-/**
- * Validate a URL
- * @param {string} url - The URL to validate
- * @returns {boolean} - True if valid URL
- */
-export function isValidUrl(url) {
+/* ---------------------------------- */
+/* URL Validation */
+/* ---------------------------------- */
+export function isValidUrl(url, { requireProtocol = true } = {}) {
+  if (typeof url !== 'string') return false;
+
   try {
-    new URL(url);
-    return true;
+    const parsed = new URL(url);
+    return requireProtocol
+      ? ['http:', 'https:'].includes(parsed.protocol)
+      : true;
   } catch {
     return false;
   }
 }
 
-/**
- * Validate a phone number (basic validation)
- * @param {string} phone - The phone number to validate
- * @returns {boolean} - True if valid phone number
- */
-export function isValidPhone(phone) {
-  const phoneRegex = /^[\d\s\-\+\(\)]+$/;
-  return phoneRegex.test(phone) && phone.replace(/\D/g, '').length >= 10;
+/* ---------------------------------- */
+/* Phone Number Validation */
+/* ---------------------------------- */
+export function isValidPhone(
+  phone,
+  { minDigits = 10, maxDigits = 15 } = {}
+) {
+  if (typeof phone !== 'string') return false;
+
+  const digits = phone.replace(/\D/g, '');
+  return digits.length >= minDigits && digits.length <= maxDigits;
 }
 
-/**
- * Validate a password (at least 8 characters, contains letter and number)
- * @param {string} password - The password to validate
- * @returns {boolean} - True if valid password
- */
-export function isValidPassword(password) {
-  return password.length >= 8 && /[A-Za-z]/.test(password) && /[0-9]/.test(password);
+/* ---------------------------------- */
+/* Password Validation */
+/* ---------------------------------- */
+export function isValidPassword(
+  password,
+  {
+    minLength = 8,
+    requireUppercase = true,
+    requireLowercase = true,
+    requireNumber = true,
+    requireSpecial = false
+  } = {}
+) {
+  if (typeof password !== 'string') return false;
+  if (password.length < minLength) return false;
+
+  if (requireUppercase && !/[A-Z]/.test(password)) return false;
+  if (requireLowercase && !/[a-z]/.test(password)) return false;
+  if (requireNumber && !/\d/.test(password)) return false;
+  if (requireSpecial && !/[!@#$%^&*(),.?":{}|<>]/.test(password)) return false;
+
+  return true;
 }
 
-/**
- * Check if a value is empty (null, undefined, empty string, empty array, empty object)
- * @param {*} value - The value to check
- * @returns {boolean} - True if value is empty
- */
+/* ---------------------------------- */
+/* Empty Check */
+/* ---------------------------------- */
 export function isEmpty(value) {
-  if (value === null || value === undefined) return true;
-  if (typeof value === 'string') return value.trim().length === 0;
+  if (value == null) return true;
+
+  if (typeof value === 'string') return value.trim() === '';
   if (Array.isArray(value)) return value.length === 0;
-  if (typeof value === 'object') return Object.keys(value).length === 0;
+  if (value instanceof Map || value instanceof Set)
+    return value.size === 0;
+
+  if (typeof value === 'object')
+    return Object.keys(value).length === 0;
+
   return false;
 }
 
-/**
- * Validate a credit card number using Luhn algorithm
- * @param {string} cardNumber - The card number to validate
- * @returns {boolean} - True if valid card number
- */
+/* ---------------------------------- */
+/* Credit Card Validation (Luhn) */
+/* ---------------------------------- */
 export function isValidCreditCard(cardNumber) {
+  if (typeof cardNumber !== 'string') return false;
+
   const digits = cardNumber.replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) return false;
 
   let sum = 0;
-  let isEven = false;
+  let doubleDigit = false;
 
   for (let i = digits.length - 1; i >= 0; i--) {
-    let digit = parseInt(digits[i]);
-    if (isEven) {
+    let digit = Number(digits[i]);
+
+    if (doubleDigit) {
       digit *= 2;
       if (digit > 9) digit -= 9;
     }
+
     sum += digit;
-    isEven = !isEven;
+    doubleDigit = !doubleDigit;
   }
 
   return sum % 10 === 0;
 }
 
+/* ---------------------------------- */
+/* Credit Card Type Detection */
+/* ---------------------------------- */
+export function getCreditCardType(cardNumber) {
+  const digits = cardNumber.replace(/\D/g, '');
+
+  if (/^4\d{12,18}$/.test(digits)) return 'Visa';
+  if (/^5[1-5]\d{14}$/.test(digits)) return 'Mastercard';
+  if (/^3[47]\d{13}$/.test(digits)) return 'American Express';
+  if (/^6(?:011|5\d{2})\d{12}$/.test(digits)) return 'Discover';
+
+  return 'Unknown';
+}
+
+/* ---------------------------------- */
+/* Number Validation */
+/* ---------------------------------- */
+export function isValidNumber(value, { min, max, integer = false } = {}) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return false;
+  if (integer && !Number.isInteger(value)) return false;
+  if (min !== undefined && value < min) return false;
+  if (max !== undefined && value > max) return false;
+  return true;
+}
+
+/* ---------------------------------- */
+/* Date Validation */
+/* ---------------------------------- */
+export function isValidDate(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return !Number.isNaN(date.getTime());
+}
+
+/* ---------------------------------- */
+/* UUID v4 Validation */
+/* ---------------------------------- */
+export function isValidUUID(uuid) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    uuid
+  );
+}
