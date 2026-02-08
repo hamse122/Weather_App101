@@ -1,62 +1,82 @@
 /**
- * Advanced Progress Tracker Utility
- * Accurate, extensible progress tracking with ETA & lifecycle control
+ * Elite Progress Tracker Utility
+ * State-aware, ETA-stable, milestone-enabled progress tracking
  */
+
+const now = () =>
+    (typeof performance !== "undefined" && performance.now)
+        ? performance.now()
+        : Date.now();
 
 export class ProgressTracker {
     constructor({
         total = 100,
         precision = 2,
-        smoothingFactor = 0.2
+        smoothingFactor = 0.2,
+        minSamplesForETA = 5
     } = {}) {
         this.total = Math.max(0, total);
         this.current = 0;
+
         this.precision = precision;
         this.smoothingFactor = smoothingFactor;
+        this.minSamplesForETA = minSamplesForETA;
 
         this.listeners = [];
         this.completeListeners = [];
+        this.milestones = new Map();
 
         this.startTime = null;
         this.endTime = null;
         this.lastUpdateTime = null;
 
-        this.paused = false;
+        this.state = "idle"; // idle | running | paused | completed
         this.smoothedRate = null;
+        this.samples = 0;
+
+        this._completionPromise = null;
+        this._resolveCompletion = null;
     }
 
-    /* -------------------- Core Controls -------------------- */
+    /* -------------------- State Control -------------------- */
 
     setTotal(total) {
         this.total = Math.max(0, total);
+        this.current = Math.min(this.current, this.total);
         this.notify();
     }
 
     setProgress(value) {
-        if (this.paused) return;
+        if (this.state === "paused" || this.state === "completed") return;
 
-        const now = performance.now();
+        const timestamp = now();
+
         if (!this.startTime) {
-            this.startTime = now;
-            this.lastUpdateTime = now;
+            this.startTime = timestamp;
+            this.lastUpdateTime = timestamp;
+            this.state = "running";
         }
 
         const delta = value - this.current;
-        const deltaTime = now - this.lastUpdateTime;
+        const deltaTime = timestamp - this.lastUpdateTime;
 
-        if (deltaTime > 0 && delta > 0) {
+        if (delta > 0 && deltaTime > 0) {
             const rate = delta / deltaTime;
+            this.samples++;
+
             this.smoothedRate = this.smoothedRate == null
                 ? rate
-                : this.smoothedRate * (1 - this.smoothingFactor) + rate * this.smoothingFactor;
+                : this.smoothedRate * (1 - this.smoothingFactor) +
+                  rate * this.smoothingFactor;
         }
 
         this.current = Math.min(Math.max(0, value), this.total);
-        this.lastUpdateTime = now;
+        this.lastUpdateTime = timestamp;
 
-        if (this.current >= this.total && !this.endTime) {
-            this.endTime = now;
-            this.notifyComplete();
+        this.checkMilestones();
+
+        if (this.current >= this.total) {
+            this.completeInternal(timestamp);
         }
 
         this.notify();
@@ -76,21 +96,25 @@ export class ProgressTracker {
         this.endTime = null;
         this.lastUpdateTime = null;
         this.smoothedRate = null;
-        this.paused = false;
+        this.samples = 0;
+        this.state = "idle";
+        this._completionPromise = null;
+        this._resolveCompletion = null;
         this.notify();
     }
 
     pause() {
-        this.paused = true;
+        if (this.state !== "running") return;
+        this.state = "paused";
     }
 
     resume() {
-        if (!this.paused) return;
-        this.paused = false;
-        this.lastUpdateTime = performance.now();
+        if (this.state !== "paused") return;
+        this.state = "running";
+        this.lastUpdateTime = now();
     }
 
-    /* -------------------- Info & Metrics -------------------- */
+    /* -------------------- Metrics -------------------- */
 
     getPercentage() {
         return this.total > 0
@@ -100,27 +124,97 @@ export class ProgressTracker {
 
     getElapsedTime() {
         if (!this.startTime) return 0;
-        return (this.endTime ?? performance.now()) - this.startTime;
+        return (this.endTime ?? now()) - this.startTime;
+    }
+
+    getAverageRate() {
+        const elapsed = this.getElapsedTime();
+        return elapsed > 0 ? this.current / elapsed : null;
     }
 
     getEstimatedTimeRemaining() {
-        if (!this.smoothedRate || this.current === 0) return null;
+        if (
+            !this.smoothedRate ||
+            this.samples < this.minSamplesForETA ||
+            this.state !== "running"
+        ) {
+            return null;
+        }
+
         const remaining = this.total - this.current;
         return remaining / this.smoothedRate;
     }
 
     getInfo() {
         return Object.freeze({
+            state: this.state,
             current: this.current,
             total: this.total,
             percentage: this.getPercentage(),
-            isComplete: this.current >= this.total,
-            paused: this.paused,
             elapsedTime: this.getElapsedTime(),
             estimatedTimeRemaining: this.getEstimatedTimeRemaining(),
+            averageRate: this.getAverageRate(),
+            smoothedRate: this.smoothedRate,
             startTime: this.startTime,
             endTime: this.endTime
         });
+    }
+
+    /* -------------------- Milestones -------------------- */
+
+    addMilestone(value, callback) {
+        if (value <= 0 || value > this.total) return;
+        this.milestones.set(value, callback);
+    }
+
+    checkMilestones() {
+        for (const [value, callback] of this.milestones) {
+            if (this.current >= value) {
+                try {
+                    callback(this.getInfo());
+                } catch (e) {
+                    console.error("Milestone error:", e);
+                }
+                this.milestones.delete(value);
+            }
+        }
+    }
+
+    /* -------------------- Async Completion -------------------- */
+
+    awaitCompletion() {
+        if (this.state === "completed") {
+            return Promise.resolve(this.getInfo());
+        }
+
+        if (!this._completionPromise) {
+            this._completionPromise = new Promise(resolve => {
+                this._resolveCompletion = resolve;
+            });
+        }
+
+        return this._completionPromise;
+    }
+
+    completeInternal(timestamp) {
+        if (this.state === "completed") return;
+
+        this.endTime = timestamp;
+        this.state = "completed";
+
+        const info = this.getInfo();
+
+        this.completeListeners.forEach(fn => {
+            try {
+                fn(info);
+            } catch (e) {
+                console.error("Completion listener error:", e);
+            }
+        });
+
+        if (this._resolveCompletion) {
+            this._resolveCompletion(info);
+        }
     }
 
     /* -------------------- Listeners -------------------- */
@@ -146,19 +240,8 @@ export class ProgressTracker {
         this.listeners.forEach(fn => {
             try {
                 fn(info);
-            } catch (err) {
-                console.error("ProgressTracker listener error:", err);
-            }
-        });
-    }
-
-    notifyComplete() {
-        const info = this.getInfo();
-        this.completeListeners.forEach(fn => {
-            try {
-                fn(info);
-            } catch (err) {
-                console.error("ProgressTracker completion listener error:", err);
+            } catch (e) {
+                console.error("Progress listener error:", e);
             }
         });
     }
