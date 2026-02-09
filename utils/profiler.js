@@ -1,104 +1,170 @@
 /**
- * Profiler Utility
- * Code profiler for tracking function performance and call counts
+ * Advanced Profiler Utility
+ * High-precision profiler for sync & async functions
  */
 
-/**
- * Profiler class for profiling code execution
- */
+const now = () =>
+  typeof performance !== 'undefined'
+    ? performance.now()
+    : Date.now();
+
 export class Profiler {
-    constructor() {
-        this.profiles = new Map();
-        this.active = false;
+  constructor({
+    enabled = true,
+    slowThreshold = 50 // ms
+  } = {}) {
+    this.enabled = enabled;
+    this.slowThreshold = slowThreshold;
+    this.profiles = new Map();
+    this.stackDepth = 0;
+  }
+
+  /* ---------------------------------- */
+  /* Control */
+  /* ---------------------------------- */
+  start() {
+    this.enabled = true;
+    this.reset();
+  }
+
+  stop() {
+    this.enabled = false;
+  }
+
+  reset() {
+    this.profiles.clear();
+  }
+
+  /* ---------------------------------- */
+  /* Core Profiling */
+  /* ---------------------------------- */
+  profile(name, fn) {
+    const profiler = this;
+
+    return function profiledFunction(...args) {
+      if (!profiler.enabled) {
+        return fn.apply(this, args);
+      }
+
+      const start = now();
+      profiler.stackDepth++;
+
+      let result;
+      let error;
+
+      try {
+        result = fn.apply(this, args);
+
+        // Handle async functions
+        if (result instanceof Promise) {
+          return result
+            .then(res => {
+              profiler._record(name, start);
+              return res;
+            })
+            .catch(err => {
+              profiler._record(name, start);
+              throw err;
+            });
+        }
+
+        return result;
+      } catch (err) {
+        error = err;
+        throw err;
+      } finally {
+        if (!(result instanceof Promise)) {
+          profiler._record(name, start);
+        }
+        profiler.stackDepth--;
+      }
+    };
+  }
+
+  /* ---------------------------------- */
+  /* Internal Metrics */
+  /* ---------------------------------- */
+  _record(name, start) {
+    const duration = now() - start;
+
+    if (!this.profiles.has(name)) {
+      this.profiles.set(name, {
+        name,
+        callCount: 0,
+        totalTime: 0,
+        minTime: Infinity,
+        maxTime: 0,
+        averageTime: 0,
+        slowCalls: 0
+      });
     }
-    
-    /**
-     * Start profiling
-     */
-    start() {
-        this.active = true;
-        this.profiles.clear();
+
+    const p = this.profiles.get(name);
+
+    p.callCount++;
+    p.totalTime += duration;
+    p.minTime = Math.min(p.minTime, duration);
+    p.maxTime = Math.max(p.maxTime, duration);
+    p.averageTime = p.totalTime / p.callCount;
+
+    if (duration >= this.slowThreshold) {
+      p.slowCalls++;
     }
-    
-    /**
-     * Stop profiling
-     */
-    stop() {
-        this.active = false;
-    }
-    
-    /**
-     * Profile a function
-     * @param {string} name - Function name
-     * @param {Function} fn - Function to profile
-     * @returns {Function} - Profiled function
-     */
-    profile(name, fn) {
-        return (...args) => {
-            if (!this.active) return fn(...args);
-            
-            const start = performance.now();
-            const result = fn(...args);
-            const end = performance.now();
-            const duration = end - start;
-            
-            if (!this.profiles.has(name)) {
-                this.profiles.set(name, {
-                    name,
-                    callCount: 0,
-                    totalTime: 0,
-                    minTime: Infinity,
-                    maxTime: 0,
-                    averageTime: 0
-                });
-            }
-            
-            const profile = this.profiles.get(name);
-            profile.callCount++;
-            profile.totalTime += duration;
-            profile.minTime = Math.min(profile.minTime, duration);
-            profile.maxTime = Math.max(profile.maxTime, duration);
-            profile.averageTime = profile.totalTime / profile.callCount;
-            
-            return result;
-        };
-    }
-    
-    /**
-     * Get profile results
-     * @returns {Array} - Array of profile results
-     */
-    getResults() {
-        return Array.from(this.profiles.values()).sort((a, b) => b.totalTime - a.totalTime);
-    }
-    
-    /**
-     * Get formatted profile report
-     * @returns {string} - Formatted report
-     */
-    getReport() {
-        const results = this.getResults();
-        let report = 'Profiler Report:\n\n';
-        
-        results.forEach(profile => {
-            report += `${profile.name}:\n`;
-            report += `  Calls: ${profile.callCount}\n`;
-            report += `  Total Time: ${profile.totalTime.toFixed(4)}ms\n`;
-            report += `  Average Time: ${profile.averageTime.toFixed(4)}ms\n`;
-            report += `  Min Time: ${profile.minTime.toFixed(4)}ms\n`;
-            report += `  Max Time: ${profile.maxTime.toFixed(4)}ms\n\n`;
-        });
-        
-        return report;
-    }
-    
-    /**
-     * Clear all profiles
-     */
-    clear() {
-        this.profiles.clear();
-    }
+  }
+
+  /* ---------------------------------- */
+  /* Results */
+  /* ---------------------------------- */
+  getResults() {
+    const results = Array.from(this.profiles.values());
+    const totalRuntime = results.reduce(
+      (sum, p) => sum + p.totalTime,
+      0
+    );
+
+    return results
+      .map(p => ({
+        ...p,
+        percentTime:
+          totalRuntime === 0
+            ? 0
+            : (p.totalTime / totalRuntime) * 100
+      }))
+      .sort((a, b) => b.totalTime - a.totalTime);
+  }
+
+  /* ---------------------------------- */
+  /* Reporting */
+  /* ---------------------------------- */
+  getReport() {
+    const results = this.getResults();
+
+    let report = `Profiler Report\n`;
+    report += `============================\n\n`;
+
+    results.forEach(p => {
+      report += `${p.name}\n`;
+      report += `  Calls        : ${p.callCount}\n`;
+      report += `  Total Time   : ${p.totalTime.toFixed(3)} ms\n`;
+      report += `  Avg Time     : ${p.averageTime.toFixed(3)} ms\n`;
+      report += `  Min Time     : ${p.minTime.toFixed(3)} ms\n`;
+      report += `  Max Time     : ${p.maxTime.toFixed(3)} ms\n`;
+      report += `  % Runtime    : ${p.percentTime.toFixed(2)}%\n`;
+      report += `  Slow Calls   : ${p.slowCalls}\n\n`;
+    });
+
+    return report;
+  }
+
+  /* ---------------------------------- */
+  /* Debug Helpers */
+  /* ---------------------------------- */
+  log() {
+    console.table(this.getResults());
+  }
 }
 
-// Global profiler instance
+/* ---------------------------------- */
+/* Global Instance */
+/* ---------------------------------- */
 export const profiler = new Profiler();
