@@ -1,103 +1,131 @@
-// Enhanced String manipulation helpers
+/**
+ * Advanced String Manipulation Helpers
+ * Unicode-safe, production-ready string utilities
+ */
+
 class StringHelpers {
-    /**
-     * Capitalize the first letter of a string.
-     */
-    static capitalize(str = "") {
-        if (!str) return "";
-        return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
-    }
 
-    /**
-     * Reverse any string.
-     */
-    static reverse(str = "") {
-        return [...str].reverse().join("");
-    }
+  /* ---------------------------------- */
+  /* Basic Transformations */
+  /* ---------------------------------- */
 
-    /**
-     * Check whether a string is a palindrome.
-     */
-    static isPalindrome(str = "") {
-        const cleanStr = str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-        return cleanStr === this.reverse(cleanStr);
-    }
+  static capitalize(str = "") {
+    if (typeof str !== "string" || !str) return "";
+    const [first, ...rest] = [...str];
+    return first.toUpperCase() + rest.join("");
+  }
 
-    /**
-     * Truncate a long string and add "..."
-     */
-    static truncate(str = "", length = 50) {
-        if (str.length <= length) return str;
-        return str.substring(0, length) + "...";
-    }
+  static reverse(str = "") {
+    return [...str].reverse().join(""); // Unicode-safe
+  }
 
-    /**
-     * Count vowels in a string (English vowels).
-     */
-    static countVowels(str = "") {
-        const matches = str.match(/[aeiou]/gi);
-        return matches ? matches.length : 0;
-    }
+  static toTitleCase(str = "") {
+    return str
+      .toLowerCase()
+      .replace(/\b\p{L}/gu, char => char.toUpperCase());
+  }
 
-    /**
-     * Convert string to Title Case.
-     */
-    static toTitleCase(str = "") {
-        return str
-            .toLowerCase()
-            .split(" ")
-            .map(word => word ? word[0].toUpperCase() + word.slice(1) : "")
-            .join(" ");
-    }
+  static removeExtraSpaces(str = "") {
+    return str.replace(/\s+/g, " ").trim();
+  }
 
-    /**
-     * Remove extra spaces from a string.
-     */
-    static removeExtraSpaces(str = "") {
-        return str.replace(/\s+/g, " ").trim();
-    }
+  static truncate(str = "", length = 50, { ellipsis = true } = {}) {
+    if (typeof str !== "string") return "";
+    if (str.length <= length) return str;
+    return str.slice(0, length) + (ellipsis ? "…" : "");
+  }
 
-    /**
-     * Count words in a string.
-     */
-    static wordCount(str = "") {
-        const cleaned = str.trim();
-        if (!cleaned) return 0;
-        return cleaned.split(/\s+/).length;
-    }
+  static repeat(str = "", n = 1) {
+    return str.repeat(Math.max(0, n));
+  }
 
-    /**
-     * Create a slug (URL-friendly text)
-     * Example: "Hello World!" → "hello-world"
-     */
-    static slugify(str = "") {
-        return str
-            .toLowerCase()
-            .trim()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-+|-+$/g, "");
-    }
+  /* ---------------------------------- */
+  /* Analysis */
+  /* ---------------------------------- */
 
-    /**
-     * Repeat a string n times.
-     */
-    static repeat(str = "", n = 1) {
-        return str.repeat(n);
-    }
+  static isPalindrome(str = "") {
+    const clean = str
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}]/gu, "")
+      .toLowerCase();
 
-    /**
-     * Check if a string contains only letters.
-     */
-    static isAlpha(str = "") {
-        return /^[A-Za-z]+$/.test(str);
-    }
+    return clean === this.reverse(clean);
+  }
 
-    /**
-     * Check if a string contains only numbers.
-     */
-    static isNumeric(str = "") {
-        return /^[0-9]+$/.test(str);
-    }
+  static countVowels(str = "") {
+    const matches = str.match(/[aeiou]/gi);
+    return matches ? matches.length : 0;
+  }
+
+  static wordCount(str = "") {
+    const matches = str.trim().match(/\b\p{L}+\b/gu);
+    return matches ? matches.length : 0;
+  }
+
+  static charCount(str = "") {
+    return [...str].length; // emoji-safe
+  }
+
+  static isAlpha(str = "") {
+    return /^\p{L}+$/u.test(str);
+  }
+
+  static isNumeric(str = "") {
+    return /^\d+$/.test(str);
+  }
+
+  static isAlphaNumeric(str = "") {
+    return /^[\p{L}\p{N}]+$/u.test(str);
+  }
+
+  static isUpperCase(str = "") {
+    return str === str.toUpperCase() && str !== str.toLowerCase();
+  }
+
+  static isLowerCase(str = "") {
+    return str === str.toLowerCase() && str !== str.toUpperCase();
+  }
+
+  /* ---------------------------------- */
+  /* Formatting */
+  /* ---------------------------------- */
+
+  static slugify(str = "") {
+    return str
+      .normalize("NFD")                     // remove accents
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  static padLeft(str = "", length = 0, char = " ") {
+    return str.padStart(length, char);
+  }
+
+  static padRight(str = "", length = 0, char = " ") {
+    return str.padEnd(length, char);
+  }
+
+  static mask(str = "", visible = 4, maskChar = "*") {
+    if (str.length <= visible) return str;
+    const maskedLength = str.length - visible;
+    return maskChar.repeat(maskedLength) + str.slice(-visible);
+  }
+
+  static extractNumbers(str = "") {
+    return (str.match(/\d+/g) || []).join("");
+  }
+
+  static extractEmails(str = "") {
+    return str.match(/[^\s@]+@[^\s@]+\.[^\s@]+/g) || [];
+  }
+
+  static extractUrls(str = "") {
+    return str.match(/https?:\/\/[^\s]+/g) || [];
+  }
 }
 
 module.exports = StringHelpers;
