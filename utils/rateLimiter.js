@@ -1,168 +1,246 @@
 /**
- * Advanced Rate Limiter
- * Supports Token Bucket, Fixed Window, Sliding Window, and Redis-based distributed limits
+ * Enterprise Rate Limiter
+ * Token Bucket, Fixed Window, Sliding Window
+ * Memory + Redis compatible
  */
 
 export class RateLimiter {
-    /**
-     * @param {Object} options
-     * @param {number} options.maxRequests - Maximum number of requests
-     * @param {number} options.timeWindow - Time window in ms
-     * @param {"fixed"|"sliding"|"token"} [options.strategy="token"]
-     * @param {Object|null} [options.storage=null] - Optional storage adapter (Redis)
-     * @param {function} [options.logger=console] - Logging function
-     */
-    constructor({ maxRequests, timeWindow, strategy = "token", storage = null, logger = console }) {
-        this.maxRequests = maxRequests;
-        this.timeWindow = timeWindow;
-        this.strategy = strategy;
-        this.logger = logger;
-        this.storage = storage;
-
-        // Memory store fallback
-        this.memory = new Map();
+  constructor({
+    maxRequests,
+    timeWindow,
+    strategy = "token",
+    storage = null,
+    burstMultiplier = 1,
+    blockDuration = 0, // ms temporary ban after limit hit
+    logger = console
+  }) {
+    if (!maxRequests || !timeWindow) {
+      throw new Error("maxRequests and timeWindow are required");
     }
 
-    /**
-     * Fetch existing bucket or create a fresh one
-     */
-    async _getBucket(key) {
-        if (this.storage) {
-            const raw = await this.storage.get(`ratelimit:${key}`);
-            if (raw) return JSON.parse(raw);
-        }
+    this.maxRequests = maxRequests;
+    this.timeWindow = timeWindow;
+    this.strategy = strategy;
+    this.storage = storage;
+    this.logger = logger;
 
-        return this.memory.get(key) || {
-            tokens: this.maxRequests,
-            lastRefill: Date.now(),
-            requestTimestamps: [] // For sliding window
-        };
+    this.capacity = maxRequests * burstMultiplier;
+    this.blockDuration = blockDuration;
+
+    this.memory = new Map();
+  }
+
+  /* ---------------------------------- */
+  /* Internal Helpers */
+  /* ---------------------------------- */
+
+  _now() {
+    return Date.now();
+  }
+
+  async _getBucket(key) {
+    if (this.storage) {
+      const raw = await this.storage.get(`ratelimit:${key}`);
+      if (raw) return JSON.parse(raw);
     }
 
-    /**
-     * Persist bucket to storage or memory
-     */
-    async _saveBucket(key, bucket) {
-        if (this.storage) {
-            await this.storage.set(`ratelimit:${key}`, JSON.stringify(bucket), "PX", this.timeWindow);
-            return;
-        }
-        this.memory.set(key, bucket);
+    return this.memory.get(key) || {
+      tokens: this.capacity,
+      lastRefill: this._now(),
+      timestamps: [],
+      windowStart: null,
+      count: 0,
+      blockedUntil: 0
+    };
+  }
+
+  async _saveBucket(key, bucket) {
+    if (this.storage) {
+      await this.storage.set(
+        `ratelimit:${key}`,
+        JSON.stringify(bucket),
+        "PX",
+        this.timeWindow * 2
+      );
+      return;
     }
 
-    /**
-     * Token bucket logic
-     */
-    _applyTokenBucket(bucket) {
-        const now = Date.now();
-        const refillRate = this.maxRequests / this.timeWindow;
-        const elapsed = now - bucket.lastRefill;
+    this.memory.set(key, bucket);
+  }
 
-        bucket.tokens = Math.min(
-            this.maxRequests,
-            bucket.tokens + elapsed * refillRate
-        );
-        bucket.lastRefill = now;
+  /* ---------------------------------- */
+  /* Token Bucket */
+  /* ---------------------------------- */
 
-        if (bucket.tokens >= 1) {
-            bucket.tokens -= 1;
-            return { allowed: true, remaining: Math.floor(bucket.tokens), resetTime: now + this.timeWindow };
-        }
+  _token(bucket) {
+    const now = this._now();
+    const refillRate = this.maxRequests / this.timeWindow;
+    const elapsed = now - bucket.lastRefill;
 
-        const waitTime = (1 - bucket.tokens) / refillRate;
-        return { allowed: false, remaining: 0, resetTime: now + waitTime };
+    bucket.tokens = Math.min(
+      this.capacity,
+      bucket.tokens + elapsed * refillRate
+    );
+    bucket.lastRefill = now;
+
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return this._allow(bucket, Math.floor(bucket.tokens));
     }
 
-    /**
-     * Fixed window logic
-     */
-    _applyFixedWindow(bucket) {
-        const now = Date.now();
+    return this._deny(bucket, (1 - bucket.tokens) / refillRate);
+  }
 
-        if (!bucket.windowStart || now - bucket.windowStart >= this.timeWindow) {
-            bucket.windowStart = now;
-            bucket.count = 0;
-        }
+  /* ---------------------------------- */
+  /* Fixed Window */
+  /* ---------------------------------- */
 
-        if (bucket.count < this.maxRequests) {
-            bucket.count++;
-            return {
-                allowed: true,
-                remaining: this.maxRequests - bucket.count,
-                resetTime: bucket.windowStart + this.timeWindow
-            };
-        }
+  _fixed(bucket) {
+    const now = this._now();
 
-        return {
-            allowed: false,
-            remaining: 0,
-            resetTime: bucket.windowStart + this.timeWindow
-        };
+    if (!bucket.windowStart || now - bucket.windowStart >= this.timeWindow) {
+      bucket.windowStart = now;
+      bucket.count = 0;
     }
 
-    /**
-     * Sliding window logic
-     */
-    _applySlidingWindow(bucket) {
-        const now = Date.now();
-        bucket.requestTimestamps = bucket.requestTimestamps.filter(ts => now - ts < this.timeWindow);
-
-        if (bucket.requestTimestamps.length < this.maxRequests) {
-            bucket.requestTimestamps.push(now);
-            return {
-                allowed: true,
-                remaining: this.maxRequests - bucket.requestTimestamps.length,
-                resetTime: now + this.timeWindow
-            };
-        }
-
-        return {
-            allowed: false,
-            remaining: 0,
-            resetTime: bucket.requestTimestamps[0] + this.timeWindow
-        };
+    if (bucket.count < this.maxRequests) {
+      bucket.count++;
+      return this._allow(bucket, this.maxRequests - bucket.count);
     }
 
-    /**
-     * Main check method
-     * @param {string} key
-     * @returns {Promise<Object>}
-     */
-    async check(key) {
-        let bucket = await this._getBucket(key);
+    return this._deny(bucket, bucket.windowStart + this.timeWindow - now);
+  }
 
-        let result;
-        switch (this.strategy) {
-            case "fixed":
-                result = this._applyFixedWindow(bucket);
-                break;
+  /* ---------------------------------- */
+  /* Sliding Window (Optimized) */
+  /* ---------------------------------- */
 
-            case "sliding":
-                result = this._applySlidingWindow(bucket);
-                break;
+  _sliding(bucket) {
+    const now = this._now();
+    const windowStart = now - this.timeWindow;
 
-            case "token":
-            default:
-                result = this._applyTokenBucket(bucket);
-                break;
-        }
-
-        await this._saveBucket(key, bucket);
-        return result;
+    while (
+      bucket.timestamps.length &&
+      bucket.timestamps[0] <= windowStart
+    ) {
+      bucket.timestamps.shift();
     }
 
-    /**
-     * Manual memory cleanup (redis auto-cleans)
-     */
-    cleanup() {
-        const now = Date.now();
-        for (const [key, bucket] of this.memory) {
-            if (
-                (bucket.lastRefill && now - bucket.lastRefill > this.timeWindow * 2) ||
-                (bucket.windowStart && now - bucket.windowStart > this.timeWindow * 2)
-            ) {
-                this.memory.delete(key);
-            }
-        }
+    if (bucket.timestamps.length < this.maxRequests) {
+      bucket.timestamps.push(now);
+      return this._allow(
+        bucket,
+        this.maxRequests - bucket.timestamps.length
+      );
     }
+
+    return this._deny(
+      bucket,
+      bucket.timestamps[0] + this.timeWindow - now
+    );
+  }
+
+  /* ---------------------------------- */
+  /* Allow / Deny */
+  /* ---------------------------------- */
+
+  _allow(bucket, remaining) {
+    return {
+      allowed: true,
+      remaining,
+      retryAfter: 0
+    };
+  }
+
+  _deny(bucket, retryMs) {
+    if (this.blockDuration > 0) {
+      bucket.blockedUntil = this._now() + this.blockDuration;
+    }
+
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfter: Math.ceil(retryMs / 1000)
+    };
+  }
+
+  /* ---------------------------------- */
+  /* Main Check */
+  /* ---------------------------------- */
+
+  async check(key) {
+    const bucket = await this._getBucket(key);
+    const now = this._now();
+
+    if (bucket.blockedUntil && now < bucket.blockedUntil) {
+      return {
+        allowed: false,
+        remaining: 0,
+        retryAfter: Math.ceil(
+          (bucket.blockedUntil - now) / 1000
+        )
+      };
+    }
+
+    let result;
+
+    switch (this.strategy) {
+      case "fixed":
+        result = this._fixed(bucket);
+        break;
+      case "sliding":
+        result = this._sliding(bucket);
+        break;
+      case "token":
+      default:
+        result = this._token(bucket);
+        break;
+    }
+
+    await this._saveBucket(key, bucket);
+    return result;
+  }
+
+  /* ---------------------------------- */
+  /* Express Middleware */
+  /* ---------------------------------- */
+
+  middleware({ keyGenerator = req => req.ip } = {}) {
+    return async (req, res, next) => {
+      const key = keyGenerator(req);
+      const result = await this.check(key);
+
+      res.setHeader("X-RateLimit-Limit", this.maxRequests);
+      res.setHeader("X-RateLimit-Remaining", result.remaining);
+      res.setHeader("Retry-After", result.retryAfter);
+
+      if (!result.allowed) {
+        return res.status(429).json({
+          error: "Too Many Requests",
+          retryAfter: result.retryAfter
+        });
+      }
+
+      next();
+    };
+  }
+
+  /* ---------------------------------- */
+  /* Memory Cleanup */
+  /* ---------------------------------- */
+
+  cleanup() {
+    const now = this._now();
+
+    for (const [key, bucket] of this.memory.entries()) {
+      if (
+        (bucket.lastRefill &&
+          now - bucket.lastRefill > this.timeWindow * 3) ||
+        (bucket.windowStart &&
+          now - bucket.windowStart > this.timeWindow * 3)
+      ) {
+        this.memory.delete(key);
+      }
+    }
+  }
 }
