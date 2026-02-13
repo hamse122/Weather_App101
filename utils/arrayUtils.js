@@ -1,141 +1,223 @@
 /**
  * =============================================
- *              ARRAY UTILITY FUNCTIONS
- *   Improved, optimized, and feature-rich
+ *        ADVANCED ARRAY UTILITY FUNCTIONS
+ *  High-performance, immutable, feature-rich
  * =============================================
  */
 
-/**
- * Ensure input is a valid array
- */
+const isArray = Array.isArray;
+
 function ensureArray(arr) {
-  if (!Array.isArray(arr)) {
-    throw new TypeError("Expected an array but received: " + typeof arr);
+  if (!isArray(arr)) {
+    throw new TypeError(`Expected an array but received: ${typeof arr}`);
   }
 }
 
-/**
- * Remove duplicates from an array
- * @param {Array} arr
- * @returns {Array}
- */
+/* ---------------------------------- */
+/* Core Utilities */
+/* ---------------------------------- */
+
 export function removeDuplicates(arr) {
   ensureArray(arr);
   return [...new Set(arr)];
 }
 
-/**
- * Chunk an array into smaller groups
- * @param {Array} arr
- * @param {number} size
- * @returns {Array[]}
- */
+export function uniqueBy(arr, keyFn) {
+  ensureArray(arr);
+  const seen = new Set();
+  return arr.filter(item => {
+    const key = keyFn(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function chunkArray(arr, size) {
   ensureArray(arr);
-  if (size <= 0) throw new Error("Chunk size must be greater than zero.");
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error("Chunk size must be a positive integer.");
+  }
 
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
+  const length = arr.length;
+  if (!length) return [];
+
+  const chunks = new Array(Math.ceil(length / size));
+  for (let i = 0, j = 0; i < length; i += size, j++) {
+    chunks[j] = arr.slice(i, i + size);
   }
   return chunks;
 }
 
-/**
- * Get a random item from an array
- * @param {Array} arr
- * @returns {*}
- */
-export function getRandomItem(arr) {
+export function flattenArray(arr, depth = Infinity) {
   ensureArray(arr);
-  if (arr.length === 0) return undefined;
-  return arr[Math.floor(Math.random() * arr.length)];
+  if (depth === 0) return [...arr];
+  return arr.flat ? arr.flat(depth) : _flattenPolyfill(arr, depth);
 }
 
-/**
- * Shuffle an array using Fisher-Yates algorithm
- * @param {Array} arr
- * @returns {Array}
- */
-export function shuffleArray(arr) {
-  ensureArray(arr);
-  const result = [...arr];
-
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
+function _flattenPolyfill(arr, depth, result = []) {
+  for (const item of arr) {
+    if (isArray(item) && depth > 0) {
+      _flattenPolyfill(item, depth - 1, result);
+    } else {
+      result.push(item);
+    }
   }
   return result;
 }
 
-/**
- * Flatten a nested array to specified depth
- * @param {Array} arr
- * @param {number} depth
- * @returns {Array}
- */
-export function flattenArray(arr, depth = Infinity) {
+/* ---------------------------------- */
+/* Random & Sampling */
+/* ---------------------------------- */
+
+export function getRandomItem(arr) {
   ensureArray(arr);
-  return arr.flat(depth);
+  const { length } = arr;
+  return length ? arr[(Math.random() * length) | 0] : undefined;
 }
 
-/**
- * Remove falsy values (null, undefined, '', 0, false)
- * @param {Array} arr
- * @returns {Array}
- */
+export function sampleArray(arr, count = 1) {
+  ensureArray(arr);
+  if (count <= 0) return [];
+  if (count >= arr.length) return shuffleArray(arr);
+
+  const result = [];
+  const used = new Set();
+
+  while (result.length < count) {
+    const idx = (Math.random() * arr.length) | 0;
+    if (!used.has(idx)) {
+      used.add(idx);
+      result.push(arr[idx]);
+    }
+  }
+
+  return result;
+}
+
+export function shuffleArray(arr) {
+  ensureArray(arr);
+  const result = arr.slice();
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result;
+}
+
+/* ---------------------------------- */
+/* Filtering & Cleaning */
+/* ---------------------------------- */
+
 export function compactArray(arr) {
   ensureArray(arr);
   return arr.filter(Boolean);
 }
 
-/**
- * Get the difference between two arrays
- * @param {Array} arr1
- * @param {Array} arr2
- * @returns {Array}
- */
+export function removeNullish(arr) {
+  ensureArray(arr);
+  return arr.filter(v => v !== null && v !== undefined);
+}
+
+/* ---------------------------------- */
+/* Set Operations (Optimized) */
+/* ---------------------------------- */
+
 export function arrayDifference(arr1, arr2) {
   ensureArray(arr1);
   ensureArray(arr2);
+
   const set2 = new Set(arr2);
-  return arr1.filter((item) => !set2.has(item));
+  return arr1.filter(item => !set2.has(item));
 }
 
-/**
- * Get the intersection of two arrays
- * @param {Array} arr1
- * @param {Array} arr2
- * @returns {Array}
- */
 export function arrayIntersection(arr1, arr2) {
   ensureArray(arr1);
   ensureArray(arr2);
+
   const set2 = new Set(arr2);
-  return arr1.filter((item) => set2.has(item));
+  return arr1.filter(item => set2.has(item));
 }
 
-/**
- * Count occurrences of items in array
- * @param {Array} arr
- * @returns {Object} - Example: { apple: 2, orange: 1 }
- */
+export function arrayUnion(...arrays) {
+  arrays.forEach(ensureArray);
+  return [...new Set(arrays.flat())];
+}
+
+/* ---------------------------------- */
+/* Advanced Analytics */
+/* ---------------------------------- */
+
 export function countOccurrences(arr) {
   ensureArray(arr);
-  return arr.reduce((acc, cur) => {
-    acc[cur] = (acc[cur] || 0) + 1;
-    return acc;
-  }, {});
+  const map = new Map();
+
+  for (const item of arr) {
+    map.set(item, (map.get(item) || 0) + 1);
+  }
+
+  return Object.fromEntries(map);
 }
 
-/**
- * Randomize N items from array (without replacement)
- * @param {Array} arr
- * @param {number} count
- * @returns {Array}
- */
-export function sampleArray(arr, count = 1) {
+export function groupBy(arr, keyFn) {
   ensureArray(arr);
-  if (count <= 0) return [];
-  return shuffleArray(arr).slice(0, count);
+  const result = {};
+
+  for (const item of arr) {
+    const key = keyFn(item);
+    (result[key] ||= []).push(item);
+  }
+
+  return result;
+}
+
+export function sortBy(arr, keyFn, order = "asc") {
+  ensureArray(arr);
+  const multiplier = order === "desc" ? -1 : 1;
+
+  return arr.slice().sort((a, b) => {
+    const ka = keyFn(a);
+    const kb = keyFn(b);
+    if (ka > kb) return 1 * multiplier;
+    if (ka < kb) return -1 * multiplier;
+    return 0;
+  });
+}
+
+/* ---------------------------------- */
+/* Utility Helpers */
+/* ---------------------------------- */
+
+export function first(arr) {
+  ensureArray(arr);
+  return arr[0];
+}
+
+export function last(arr) {
+  ensureArray(arr);
+  return arr[arr.length - 1];
+}
+
+export function take(arr, n = 1) {
+  ensureArray(arr);
+  return arr.slice(0, Math.max(0, n));
+}
+
+export function drop(arr, n = 1) {
+  ensureArray(arr);
+  return arr.slice(Math.max(0, n));
+}
+
+export function partition(arr, predicate) {
+  ensureArray(arr);
+  const truthy = [];
+  const falsy = [];
+
+  for (const item of arr) {
+    (predicate(item) ? truthy : falsy).push(item);
+  }
+
+  return [truthy, falsy];
 }
