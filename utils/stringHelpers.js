@@ -1,69 +1,118 @@
 /**
- * String Helper Functions
- * Provides useful string manipulation and utility functions
+ * String Helper Functions (Enhanced Version)
+ * Production-ready utility helpers with validation & edge-case handling
  */
 
 /**
  * Capitalize the first letter of a string
- * @param {string} str - The string to capitalize
- * @returns {string} - Capitalized string
+ * @param {string} str
+ * @returns {string}
  */
-export function capitalize(str) {
+export function capitalize(str = '') {
+  if (typeof str !== 'string' || !str.trim()) return '';
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 }
 
 /**
  * Convert a string to camelCase
- * @param {string} str - The string to convert
- * @returns {string} - camelCase string
+ * Handles spaces, underscores, and hyphens
+ * @param {string} str
+ * @returns {string}
  */
-export function toCamelCase(str) {
+export function toCamelCase(str = '') {
+  if (typeof str !== 'string') return '';
+
   return str
-    .replace(/(?:^\w|[A-Z]|\b\w)/g, (word, index) => {
-      return index === 0 ? word.toLowerCase() : word.toUpperCase();
-    })
-    .replace(/\s+/g, '');
+    .toLowerCase()
+    .trim()
+    .replace(/[-_\s]+(.)?/g, (_, char) => (char ? char.toUpperCase() : ''));
 }
 
 /**
  * Convert a string to kebab-case
- * @param {string} str - The string to convert
- * @returns {string} - kebab-case string
+ * Handles camelCase, spaces, and underscores
+ * @param {string} str
+ * @returns {string}
  */
-export function toKebabCase(str) {
+export function toKebabCase(str = '') {
+  if (typeof str !== 'string') return '';
+
   return str
-    .replace(/([a-z])([A-Z])/g, '$1-$2')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .replace(/[\s_]+/g, '-')
     .toLowerCase();
 }
 
 /**
  * Truncate a string to a specified length
- * @param {string} str - The string to truncate
- * @param {number} length - Maximum length
- * @param {string} suffix - Suffix to add if truncated (default: '...')
- * @returns {string} - Truncated string
+ * Optionally prevents breaking words
+ * @param {string} str
+ * @param {number} length
+ * @param {Object} options
+ * @param {string} options.suffix - Suffix if truncated (default: '...')
+ * @param {boolean} options.wordBoundary - Avoid cutting words (default: false)
+ * @returns {string}
  */
-export function truncate(str, length, suffix = '...') {
+export function truncate(
+  str = '',
+  length = 0,
+  { suffix = '...', wordBoundary = false } = {}
+) {
+  if (typeof str !== 'string' || length <= 0) return '';
+
   if (str.length <= length) return str;
-  return str.slice(0, length) + suffix;
+
+  let truncated = str.slice(0, length);
+
+  if (wordBoundary) {
+    truncated = truncated.slice(0, truncated.lastIndexOf(' '));
+  }
+
+  return truncated + suffix;
 }
 
 /**
  * Remove all whitespace from a string
- * @param {string} str - The string to process
- * @returns {string} - String without whitespace
+ * @param {string} str
+ * @returns {string}
  */
-export function removeWhitespace(str) {
+export function removeWhitespace(str = '') {
+  if (typeof str !== 'string') return '';
   return str.replace(/\s+/g, '');
 }
 
 /**
- * Reverse a string
- * @param {string} str - The string to reverse
- * @returns {string} - Reversed string
+ * Reverse a string (Unicode safe)
+ * @param {string} str
+ * @returns {string}
  */
-export function reverseString(str) {
-  return str.split('').reverse().join('');
+export function reverseString(str = '') {
+  if (typeof str !== 'string') return '';
+  return [...str].reverse().join('');
 }
 
+/**
+ * Check if a string is a palindrome
+ * @param {string} str
+ * @returns {boolean}
+ */
+export function isPalindrome(str = '') {
+  if (typeof str !== 'string') return false;
+
+  const cleaned = str.replace(/[\W_]/g, '').toLowerCase();
+  return cleaned === [...cleaned].reverse().join('');
+}
+
+/**
+ * Generate a random string
+ * @param {number} length
+ * @returns {string}
+ */
+export function randomString(length = 8) {
+  const chars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from({ length }, () =>
+    chars.charAt(Math.floor(Math.random() * chars.length))
+  ).join('');
+}
