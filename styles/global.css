@@ -1,75 +1,168 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 
 :root {
-  /* Color Palette */
-  --bg-color: #ededf3;
-  --text-color: #011b39;
+  /* ========== Color System ========== */
+  --bg-color: #f4f6fb;
+  --surface-color: #ffffff;
+  --text-color: #0f172a;
+  --text-muted: #64748b;
   --primary-color: #1f5eff;
-  --border-color: #ccd2e0;
+  --primary-hover: #1746cc;
+  --border-color: #e2e8f0;
+  --danger-color: #ef4444;
+  --success-color: #22c55e;
 
-  /* Typography */
+  /* ========== Typography ========== */
   --font-main: 'Inter', 'Segoe UI', Arial, sans-serif;
 
-  /* Layout */
-  --radius: 8px;
-  --transition: 0.25s ease;
+  /* ========== Layout ========== */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --transition-fast: 0.2s ease;
+  --transition: 0.3s ease;
+  --shadow-sm: 0 2px 6px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
-* {
+/* ========== Reset ========== */
+*,
+*::before,
+*::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
+/* ========== Base Body ========== */
 body {
   background: var(--bg-color);
   color: var(--text-color);
   font-family: var(--font-main);
   overflow-x: hidden;
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* General Form Styles */
+/* ========== Typography Enhancements ========== */
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+p {
+  color: var(--text-muted);
+}
+
+/* ========== Form Styles ========== */
 input,
-button,
 select,
 textarea {
-  font-family: inherit;
+  width: 100%;
   font-size: 15px;
   padding: 12px 14px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
-  outline: none;
+  background: var(--surface-color);
   transition: var(--transition);
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--primary-color);
 }
 
 input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.2);
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.15);
 }
 
+/* ========== Button System ========== */
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--primary-color);
   color: #fff;
   border: none;
   cursor: pointer;
   font-weight: 600;
+  padding: 12px 18px;
+  border-radius: var(--radius-md);
+  transition: var(--transition-fast);
+  box-shadow: var(--shadow-sm);
 }
 
 button:hover {
-  background: #164ad9;
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
 }
 
-/* Smooth Scroll */
+button:active {
+  transform: translateY(0);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Secondary Button */
+.button-outline {
+  background: transparent;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+}
+
+.button-outline:hover {
+  background: var(--primary-color);
+  color: #fff;
+}
+
+/* ========== Cards ========== */
+.card {
+  background: var(--surface-color);
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition: var(--transition);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* ========== Container ========== */
+.container {
+  width: min(95%, 1200px);
+  margin: auto;
+  padding: 40px 0;
+}
+
+/* ========== Smooth Scroll ========== */
 html {
   scroll-behavior: smooth;
 }
 
-/* Responsive Container */
-.container {
-  width: min(95%, 1200px);
-  margin: auto;
-  padding: 20px 0;
+/* ========== Scrollbar Styling ========== */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary-color);
+  border-radius: 10px;
+}
+
+/* ========== Responsive Improvements ========== */
+@media (max-width: 768px) {
+  .container {
+    width: 92%;
+    padding: 30px 0;
+  }
+
+  button {
+    width: 100%;
+  }
 }
