@@ -1,37 +1,40 @@
 /**
- * Advanced Dependency Injection Container
- * - Supports Singletons, Factories, Transients, Scopes
- * - Auto dependency resolution via parameter introspection
+ * Advanced Dependency Injection Container (v2 - 2026 Edition)
+ * ------------------------------------------------------------
+ * Features:
+ * - Singleton / Transient / Scoped lifetimes
+ * - True factory providers
+ * - Child scopes
  * - Async providers
- * - Lifecycle hooks (onInit / onDestroy)
  * - Circular dependency detection
+ * - Lifecycle hooks (onInit / onDestroy)
  * - Aliases
+ * - Strict mode
+ * - Resolution caching per-scope
  */
 
 class DependencyInjector {
-    constructor({ strict = false } = {}) {
+    constructor({ strict = false, parent = null } = {}) {
         this.providers = new Map();
-        this.singletons = new Map();
-        this.cache = new Map();
+        this.singletons = parent ? parent.singletons : new Map();
+        this.scopedCache = new Map();
         this.aliases = new Map();
         this.strict = strict;
+        this.parent = parent;
         this.locked = false;
     }
 
-    /**
-     * Register service provider
-     * @param {string} name
-     * @param {Function|any} implementation
-     * @param {Object} options
-     */
+    /* =========================
+       REGISTRATION
+    ========================== */
+
     register(name, implementation, options = {}) {
         this.ensureUnlocked();
 
         const {
-            singleton = false,
-            factory = false,
-            scope = "transient",
+            lifetime = "transient", // singleton | transient | scoped
             dependencies = null,
+            factory = false,
             onInit = null,
             onDestroy = null
         } = options;
@@ -39,10 +42,9 @@ class DependencyInjector {
         this.providers.set(name, {
             name,
             implementation,
-            singleton,
-            factory,
-            scope,
+            lifetime,
             dependencies,
+            factory,
             onInit,
             onDestroy
         });
@@ -50,61 +52,95 @@ class DependencyInjector {
         return this;
     }
 
-    /**
-     * Define an alias for a provider
-     */
+    singleton(name, impl, dependencies = []) {
+        return this.register(name, impl, {
+            lifetime: "singleton",
+            dependencies
+        });
+    }
+
+    scoped(name, impl, dependencies = []) {
+        return this.register(name, impl, {
+            lifetime: "scoped",
+            dependencies
+        });
+    }
+
+    transient(name, impl, dependencies = []) {
+        return this.register(name, impl, {
+            lifetime: "transient",
+            dependencies
+        });
+    }
+
+    factory(name, impl, dependencies = []) {
+        return this.register(name, impl, {
+            lifetime: "transient",
+            dependencies,
+            factory: true
+        });
+    }
+
+    value(name, val) {
+        return this.register(name, val, { lifetime: "singleton" });
+    }
+
     alias(aliasName, serviceName) {
         this.ensureUnlocked();
         this.aliases.set(aliasName, serviceName);
     }
 
-    /**
-     * Resolve provider by name (supports aliases)
-     */
-    resolveName(name) {
-        return this.aliases.get(name) || name;
-    }
+    /* =========================
+       RESOLUTION
+    ========================== */
 
-    /**
-     * Retrieve a service instance
-     */
-    async get(name, resolvingStack = []) {
+    async get(name, stack = []) {
         name = this.resolveName(name);
 
-        if (!this.providers.has(name)) {
-            throw new Error(`Service '${name}' not found`);
+        const provider = this.getProvider(name);
+
+        if (!provider) {
+            if (this.strict) {
+                throw new Error(`Service '${name}' not found`);
+            }
+            return null;
         }
 
-        // Circular dependency detection
-        if (resolvingStack.includes(name)) {
+        if (stack.includes(name)) {
             throw new Error(
-                `Circular dependency detected: ${resolvingStack.join(" -> ")} -> ${name}`
+                `Circular dependency detected: ${[...stack, name].join(" -> ")}`
             );
         }
 
-        const provider = this.providers.get(name);
+        // SINGLETON
+        if (provider.lifetime === "singleton") {
+            if (this.singletons.has(name)) {
+                return this.singletons.get(name);
+            }
 
-        // Singleton cache
-        if (provider.singleton && this.cache.has(name)) {
-            return this.cache.get(name);
+            const instance = await this.instantiate(provider, [...stack, name]);
+            this.singletons.set(name, instance);
+            return instance;
         }
 
-        const instance = await this.createInstance(provider, [...resolvingStack, name]);
+        // SCOPED
+        if (provider.lifetime === "scoped") {
+            if (this.scopedCache.has(name)) {
+                return this.scopedCache.get(name);
+            }
 
-        if (provider.singleton) {
-            this.cache.set(name, instance);
+            const instance = await this.instantiate(provider, [...stack, name]);
+            this.scopedCache.set(name, instance);
+            return instance;
         }
 
-        return instance;
+        // TRANSIENT
+        return this.instantiate(provider, [...stack, name]);
     }
 
-    /**
-     * Create a new instance from provider
-     */
-    async createInstance(provider, stack) {
-        let { implementation, dependencies } = provider;
+    async instantiate(provider, stack) {
+        let { implementation, dependencies, factory, onInit } = provider;
 
-        // Auto-detect dependencies if not provided
         if (!dependencies && typeof implementation === "function") {
             dependencies = this.extractParamNames(implementation);
         }
@@ -118,7 +154,9 @@ class DependencyInjector {
         let instance;
 
         if (typeof implementation === "function") {
-            if (this.isClass(implementation)) {
+            if (factory) {
+                instance = await implementation(...resolvedDeps);
+            } else if (this.isClass(implementation)) {
                 instance = new implementation(...resolvedDeps);
             } else {
                 instance = await implementation(...resolvedDeps);
@@ -127,97 +165,105 @@ class DependencyInjector {
             instance = implementation;
         }
 
-        if (provider.onInit) {
-            await provider.onInit(instance);
+        if (onInit) {
+            await onInit(instance);
         }
 
         return instance;
     }
 
-    /**
-     * Extract constructor parameter names
-     */
-    extractParamNames(fn) {
-        const fnStr = fn.toString().replace(/\/\*.*?\*\//g, "");
-        const argsMatch = fnStr.match(/(?:constructor\s*\(|^\s*function\s*[^(]*\(|^[^(]*)\(([^)]*)\)/);
+    /* =========================
+       SCOPES
+    ========================== */
 
-        if (!argsMatch) return [];
-        return argsMatch[1]
-            .split(",")
-            .map(s => s.trim())
-            .filter(Boolean);
+    createScope() {
+        return new DependencyInjector({
+            strict: this.strict,
+            parent: this
+        });
     }
 
-    /**
-     * Check if value is a class constructor
-     */
-    isClass(fn) {
-        return typeof fn === "function" &&
-            /^class\s/.test(Function.prototype.toString.call(fn));
+    async destroyScope() {
+        for (const [name, provider] of this.providers) {
+            if (
+                provider.lifetime === "scoped" &&
+                provider.onDestroy &&
+                this.scopedCache.has(name)
+            ) {
+                await provider.onDestroy(this.scopedCache.get(name));
+            }
+        }
+        this.scopedCache.clear();
     }
 
-    /**
-     * Manually register a singleton
-     */
-    singleton(name, impl, dependencies = []) {
-        return this.register(name, impl, { singleton: true, dependencies });
+    async destroyAll() {
+        for (const [name, provider] of this.providers) {
+            if (
+                provider.lifetime === "singleton" &&
+                provider.onDestroy &&
+                this.singletons.has(name)
+            ) {
+                await provider.onDestroy(this.singletons.get(name));
+            }
+        }
+        this.singletons.clear();
     }
 
-    /**
-     * Factory provider (new instance each call)
-     */
-    factory(name, impl, dependencies = []) {
-        return this.register(name, impl, { factory: true, dependencies });
+    /* =========================
+       INTERNALS
+    ========================== */
+
+    getProvider(name) {
+        return (
+            this.providers.get(name) ||
+            this.parent?.getProvider(name) ||
+            null
+        );
     }
 
-    /**
-     * Register a primitive or non-constructible value
-     */
-    value(name, val) {
-        return this.register(name, val);
+    resolveName(name) {
+        return this.aliases.get(name) || name;
     }
 
-    /**
-     * Check if provider exists
-     */
     has(name) {
-        return this.providers.has(name) || this.aliases.has(name);
+        return !!this.getProvider(name);
     }
 
-    /**
-     * Remove all registrations
-     */
     clear() {
         this.ensureUnlocked();
         this.providers.clear();
-        this.cache.clear();
         this.aliases.clear();
+        this.scopedCache.clear();
     }
 
-    /**
-     * Lock DI container (cannot register after this)
-     */
     lock() {
         this.locked = true;
     }
 
     ensureUnlocked() {
         if (this.locked) {
-            throw new Error("DI container is locked and cannot accept new registrations.");
+            throw new Error("DI container is locked.");
         }
     }
 
-    /**
-     * Lifecycle destruction
-     */
-    async destroyAll() {
-        for (const [name, provider] of this.providers) {
-            if (provider.onDestroy && this.cache.has(name)) {
-                await provider.onDestroy(this.cache.get(name));
-            }
-        }
+    isClass(fn) {
+        return typeof fn === "function" &&
+            /^class\s/.test(Function.prototype.toString.call(fn));
+    }
 
-        this.cache.clear();
+    extractParamNames(fn) {
+        const fnStr = fn
+            .toString()
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/\/\/.*$/gm, "");
+
+        const argsMatch = fnStr.match(/\(([^)]*)\)/);
+        if (!argsMatch) return [];
+
+        return argsMatch[1]
+            .split(",")
+            .map(s => s.trim().replace(/=.*$/, ""))
+            .filter(Boolean);
     }
 }
 
