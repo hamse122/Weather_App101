@@ -1,144 +1,197 @@
-
 /**
- * Pagination Utility
- * Advanced pagination system for handling item pagination
+ * Advanced Pagination Utility (2026 Edition)
+ * - Client-side & optional server-side mode
+ * - Filtering & sorting
+ * - Page change listeners
+ * - Safe state management
  */
 
 export class Pagination {
-    constructor(items = [], pageSize = 10) {
-        this.items = items;
-        this.pageSize = pageSize;
+    constructor({
+        items = [],
+        pageSize = 10,
+        serverSide = false
+    } = {}) {
+        this._originalItems = Array.isArray(items) ? items : [];
+        this.items = [...this._originalItems];
+
+        this.pageSize = Math.max(1, pageSize);
         this.currentPage = 1;
-        this.totalPages = Math.ceil(items.length / pageSize);
+        this.serverSide = serverSide;
+
+        this._listeners = new Set();
+
+        this._recalculate();
     }
-    
-    /**
-     * Get the current page items
-     */
-    getCurrentPage() {
+
+    /* ======================================================
+       INTERNAL
+    ====================================================== */
+
+    _recalculate() {
+        this.totalItems = this.items.length;
+        this.totalPages = Math.max(
+            1,
+            Math.ceil(this.totalItems / this.pageSize)
+        );
+
+        if (this.currentPage > this.totalPages) {
+            this.currentPage = this.totalPages;
+        }
+    }
+
+    _emit() {
+        const info = this.getPageInfo();
+        this._listeners.forEach(cb => cb(info));
+    }
+
+    _slice() {
+        if (this.serverSide) return this.items;
+
         const start = (this.currentPage - 1) * this.pageSize;
-        const end = start + this.pageSize;
-        return this.items.slice(start, end);
+        return this.items.slice(start, start + this.pageSize);
     }
 
-    /**
-     * Move to the next page
-     */
-    nextPage() {
-        if (this.currentPage < this.totalPages) {
-            this.currentPage++;
-        }
-        return this.getCurrentPage();
+    /* ======================================================
+       CORE METHODS
+    ====================================================== */
+
+    getCurrentPage() {
+        return this._slice();
     }
 
-    /**
-     * Move to the previous page
-     */
-    previousPage() {
-        if (this.currentPage > 1) {
-            this.currentPage--;
-        }
-        return this.getCurrentPage();
-    }
-
-    /**
-     * Go to a specific page
-     */
     goToPage(page) {
-        if (page >= 1 && page <= this.totalPages) {
-            this.currentPage = page;
-        }
+        const newPage = Number(page);
+
+        if (!Number.isInteger(newPage)) return this.getCurrentPage();
+
+        this.currentPage = Math.min(
+            Math.max(1, newPage),
+            this.totalPages
+        );
+
+        this._emit();
         return this.getCurrentPage();
     }
 
-    /**
-     * Get pagination information
-     */
-    getPageInfo() {
-        return {
-            currentPage: this.currentPage,
-            totalPages: this.totalPages,
-            totalItems: this.items.length,
-            hasNext: this.currentPage < this.totalPages,
-            hasPrevious: this.currentPage > 1,
-            startIndex: (this.currentPage - 1) * this.pageSize,
-            endIndex: Math.min(this.currentPage * this.pageSize, this.items.length)
-        };
+    nextPage() {
+        return this.goToPage(this.currentPage + 1);
     }
 
-    /**
-     * Update the items array
-     */
-    updateItems(newItems) {
-        this.items = newItems;
-        this.totalPages = Math.ceil(newItems.length / this.pageSize);
-        this.currentPage = 1;
+    previousPage() {
+        return this.goToPage(this.currentPage - 1);
     }
 
-    /* ---------------------------------------------------------
-     * ADDITIONAL LINES ADDED BELOW
-     * --------------------------------------------------------- */
-
-    /**
-     * Change the page size dynamically
-     * @param {number} newSize
-     */
-    updatePageSize(newSize) {
-        if (newSize <= 0) throw new Error("Page size must be greater than zero.");
-        this.pageSize = newSize;
-        this.totalPages = Math.ceil(this.items.length / newSize);
-        this.currentPage = 1;
-    }
-
-    /**
-     * Check if the pagination is empty
-     * @returns {boolean}
-     */
-    isEmpty() {
-        return this.items.length === 0;
-    }
-
-    /**
-     * Get the first page
-     */
     firstPage() {
-        this.currentPage = 1;
-        return this.getCurrentPage();
+        return this.goToPage(1);
     }
 
-    /**
-     * Get the last page
-     */
     lastPage() {
-        this.currentPage = this.totalPages;
-        return this.getCurrentPage();
+        return this.goToPage(this.totalPages);
     }
 
-    /**
-     * Append items to existing list
-     * @param {Array} extraItems
-     */
-    appendItems(extraItems) {
-        this.items = [...this.items, ...extraItems];
-        this.totalPages = Math.ceil(this.items.length / this.pageSize);
+    /* ======================================================
+       DATA MANAGEMENT
+    ====================================================== */
+
+    updateItems(newItems = []) {
+        this._originalItems = [...newItems];
+        this.items = [...newItems];
+        this.currentPage = 1;
+        this._recalculate();
+        this._emit();
     }
 
-    /**
-     * Remove an item by index
-     * @param {number} index
-     */
+    appendItems(extraItems = []) {
+        this._originalItems.push(...extraItems);
+        this.items.push(...extraItems);
+        this._recalculate();
+        this._emit();
+    }
+
     removeItem(index) {
         if (index < 0 || index >= this.items.length) return false;
+
         this.items.splice(index, 1);
-        this.totalPages = Math.ceil(this.items.length / this.pageSize);
-        if (this.currentPage > this.totalPages) this.currentPage = this.totalPages;
+        this._originalItems.splice(index, 1);
+
+        this._recalculate();
+        this._emit();
         return true;
     }
 
-    /**
-     * Reset pagination
-     */
-    reset() {
+    updatePageSize(newSize) {
+        if (!Number.isInteger(newSize) || newSize <= 0) {
+            throw new Error("Page size must be a positive integer.");
+        }
+
+        this.pageSize = newSize;
         this.currentPage = 1;
+        this._recalculate();
+        this._emit();
+    }
+
+    reset() {
+        this.items = [...this._originalItems];
+        this.currentPage = 1;
+        this._recalculate();
+        this._emit();
+    }
+
+    /* ======================================================
+       FILTER & SORT
+    ====================================================== */
+
+    filter(predicate) {
+        if (typeof predicate !== "function") return;
+
+        this.items = this._originalItems.filter(predicate);
+        this.currentPage = 1;
+        this._recalculate();
+        this._emit();
+    }
+
+    sort(compareFn) {
+        if (typeof compareFn !== "function") return;
+
+        this.items.sort(compareFn);
+        this._emit();
+    }
+
+    /* ======================================================
+       LISTENERS
+    ====================================================== */
+
+    onPageChange(callback) {
+        if (typeof callback !== "function") return;
+        this._listeners.add(callback);
+
+        return () => this._listeners.delete(callback);
+    }
+
+    /* ======================================================
+       INFO
+    ====================================================== */
+
+    getPageInfo() {
+        const startIndex = (this.currentPage - 1) * this.pageSize;
+        const endIndex = Math.min(
+            startIndex + this.pageSize,
+            this.totalItems
+        );
+
+        return {
+            currentPage: this.currentPage,
+            totalPages: this.totalPages,
+            totalItems: this.totalItems,
+            pageSize: this.pageSize,
+            hasNext: this.currentPage < this.totalPages,
+            hasPrevious: this.currentPage > 1,
+            startIndex,
+            endIndex,
+            isFirstPage: this.currentPage === 1,
+            isLastPage: this.currentPage === this.totalPages,
+            isEmpty: this.totalItems === 0
+        };
     }
 }
