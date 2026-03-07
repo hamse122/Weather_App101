@@ -1,39 +1,55 @@
+const { EventEmitter } = require("events");
+
 /**
- * HealthCheck Manager – v2 (Production Ready)
+ * HealthCheck Manager – v3 (Advanced Production)
  */
-class HealthCheck {
+class HealthCheck extends EventEmitter {
+
     constructor(options = {}) {
+        super();
+
         this.checks = new Map();
+
         this.timeout = options.timeout ?? 5000;
         this.parallel = options.parallel !== false;
-        this.cacheTTL = options.cacheTTL ?? 0; // ms
-        this.hooks = {
-            onStart: options.onStart,
-            onSuccess: options.onSuccess,
-            onFailure: options.onFailure
+        this.concurrency = options.concurrency ?? Infinity;
+        this.cacheTTL = options.cacheTTL ?? 0;
+
+        this.metrics = {
+            totalRuns: 0,
+            passes: 0,
+            warns: 0,
+            fails: 0,
+            avgDuration: 0
         };
     }
 
     register(name, checkFn, options = {}) {
-        if (!name || typeof name !== "string") {
-            throw new Error("Health check name must be a non-empty string");
-        }
-        if (this.checks.has(name)) {
-            throw new Error(`Health check "${name}" already registered`);
-        }
-        if (typeof checkFn !== "function") {
-            throw new Error("Health check must be a function");
-        }
+
+        if (!name || typeof name !== "string")
+            throw new Error("Health check name must be string");
+
+        if (this.checks.has(name))
+            throw new Error(`Health check "${name}" already exists`);
+
+        if (typeof checkFn !== "function")
+            throw new Error("checkFn must be function");
 
         this.checks.set(name, {
+
             name,
             checkFn,
+
             critical: options.critical !== false,
             tags: options.tags ?? [],
+
             timeout: options.timeout ?? this.timeout,
             retries: options.retries ?? 0,
             retryDelay: options.retryDelay ?? 0,
+
             cooldown: options.cooldown ?? 0,
+            dependsOn: options.dependsOn ?? [],
+
             lastCheckedAt: null,
             lastResult: null
         });
@@ -46,54 +62,74 @@ class HealthCheck {
         return this;
     }
 
-    /**
-     * Run checks
-     * @param {object|string} input
-     */
-    async run(input) {
-        let targetChecks = [...this.checks.values()];
+    async run(filter = {}) {
 
-        if (typeof input === "string") {
-            const check = this.checks.get(input);
-            if (!check) throw new Error(`Health check "${input}" not registered`);
-            targetChecks = [check];
+        let checks = [...this.checks.values()];
+
+        if (typeof filter === "string") {
+            const c = this.checks.get(filter);
+            if (!c) throw new Error(`Check "${filter}" not found`);
+            checks = [c];
         }
 
-        if (input?.tags?.length) {
-            targetChecks = targetChecks.filter(c =>
-                c.tags.some(t => input.tags.includes(t))
+        if (filter.tags?.length) {
+            checks = checks.filter(c =>
+                c.tags.some(t => filter.tags.includes(t))
             );
         }
 
-        const tasks = targetChecks.map(check =>
-            this.parallel
-                ? this.executeIfReady(check)
-                : () => this.executeIfReady(check)
-        );
-
         const results = this.parallel
-            ? await Promise.all(tasks)
-            : await this.runSequential(tasks);
+            ? await this.runParallel(checks)
+            : await this.runSequential(checks);
 
         const details = {};
         results.forEach(r => details[r.name] = r);
 
+        this.metrics.totalRuns++;
+
         return {
             status: this.aggregateStatus(results),
             timestamp: new Date().toISOString(),
+            metrics: this.metrics,
             details
         };
     }
 
-    async runSequential(tasks) {
+    async runSequential(checks) {
+
         const results = [];
-        for (const task of tasks) {
-            results.push(await task());
+
+        for (const check of checks) {
+            results.push(await this.executeIfReady(check));
         }
+
+        return results;
+    }
+
+    async runParallel(checks) {
+
+        const results = [];
+        const pool = [];
+
+        for (const check of checks) {
+
+            const task = this.executeIfReady(check)
+                .then(r => results.push(r));
+
+            pool.push(task);
+
+            if (pool.length >= this.concurrency) {
+                await Promise.race(pool);
+                pool.splice(pool.findIndex(p => p === task), 1);
+            }
+        }
+
+        await Promise.all(pool);
         return results;
     }
 
     async executeIfReady(check) {
+
         const now = Date.now();
 
         if (
@@ -111,34 +147,57 @@ class HealthCheck {
             return { ...check.lastResult, skipped: true };
         }
 
+        for (const dep of check.dependsOn) {
+            const depCheck = this.checks.get(dep);
+            if (depCheck?.lastResult?.status === "fail") {
+                return {
+                    name: check.name,
+                    status: "skipped",
+                    reason: `dependency ${dep} failed`
+                };
+            }
+        }
+
         return this.executeCheck(check);
     }
 
     async executeCheck(check) {
+
         const startedAt = Date.now();
         let attempt = 0;
         let error = null;
         let status = "pass";
 
-        this.hooks.onStart?.(check.name);
+        this.emit("start", check.name);
+
+        const controller = new AbortController();
 
         while (attempt <= check.retries) {
+
             try {
+
                 attempt++;
+
                 const result = await this.withTimeout(
-                    Promise.resolve().then(check.checkFn),
+                    Promise.resolve().then(() =>
+                        check.checkFn({ signal: controller.signal })
+                    ),
                     check.timeout
                 );
 
                 if (result === false) {
                     status = check.critical ? "fail" : "warn";
-                    break;
                 }
 
-                status = "pass";
                 break;
+
             } catch (err) {
+
                 error = err;
+
+                if (err.message.includes("timeout"))
+                    status = "timeout";
+
                 if (attempt > check.retries) {
                     status = check.critical ? "fail" : "warn";
                 } else if (check.retryDelay) {
@@ -147,15 +206,17 @@ class HealthCheck {
             }
         }
 
+        const duration = Date.now() - startedAt;
+
         const output = Object.freeze({
             name: check.name,
             status,
             critical: check.critical,
-            duration: Date.now() - startedAt,
+            duration,
             attempts: attempt,
             tags: [...check.tags],
             error: error
-                ? { message: error.message, stack: error.stack }
+                ? { message: error.message }
                 : null,
             timestamp: new Date().toISOString()
         });
@@ -163,25 +224,42 @@ class HealthCheck {
         check.lastCheckedAt = Date.now();
         check.lastResult = output;
 
-        if (status === "pass") this.hooks.onSuccess?.(output);
-        else this.hooks.onFailure?.(output);
+        this.updateMetrics(output);
+
+        if (status === "pass") this.emit("success", output);
+        else this.emit("failure", output);
 
         return output;
     }
 
+    updateMetrics(result) {
+
+        if (result.status === "pass") this.metrics.passes++;
+        if (result.status === "warn") this.metrics.warns++;
+        if (result.status === "fail") this.metrics.fails++;
+
+        this.metrics.avgDuration =
+            (this.metrics.avgDuration + result.duration) / 2;
+    }
+
     aggregateStatus(results) {
+
         if (results.some(r => r.status === "fail")) return "fail";
         if (results.some(r => r.status === "warn")) return "warn";
+        if (results.some(r => r.status === "timeout")) return "warn";
+
         return "pass";
     }
 
     async withTimeout(promise, timeout) {
+
         let timer;
+
         return Promise.race([
             promise,
             new Promise((_, reject) => {
                 timer = setTimeout(
-                    () => reject(new Error("Health check timeout exceeded")),
+                    () => reject(new Error("timeout exceeded")),
                     timeout
                 );
             })
@@ -189,7 +267,7 @@ class HealthCheck {
     }
 
     sleep(ms) {
-        return new Promise(res => setTimeout(res, ms));
+        return new Promise(r => setTimeout(r, ms));
     }
 
     isHealthy() {
@@ -198,8 +276,11 @@ class HealthCheck {
     }
 
     summary() {
+
         const out = {};
+
         for (const [name, c] of this.checks) {
+
             out[name] = {
                 status: c.lastResult?.status ?? "unknown",
                 lastCheckedAt: c.lastCheckedAt
@@ -209,6 +290,7 @@ class HealthCheck {
                 tags: c.tags
             };
         }
+
         return out;
     }
 }
