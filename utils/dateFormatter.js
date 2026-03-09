@@ -1,103 +1,119 @@
 /**
- * Enhanced Date Formatter Utilities
- * A lightweight alternative to Moment.js / Day.js
+ * Enhanced Date Formatter Utilities v2
+ * Lightweight alternative to Moment.js / Day.js
  */
 
-/**
- * Validate and normalize input date
- */
+/* -----------------------------
+   Internal Helpers
+----------------------------- */
+
 function normalizeDate(date) {
   const d = new Date(date);
   return isNaN(d.getTime()) ? null : d;
 }
 
-/**
- * Full-featured date formatting (mini moment.js)
- * Supported tokens:
- * YYYY, YY, MMMM, MMM, MM, M, DD, D, HH, H, hh, h, mm, ss, A, a
- */
+const monthsFull = [
+  "January","February","March","April","May","June",
+  "July","August","September","October","November","December"
+];
+
+const monthsShort = monthsFull.map(m => m.slice(0,3));
+
+const weekdaysFull = [
+  "Sunday","Monday","Tuesday","Wednesday",
+  "Thursday","Friday","Saturday"
+];
+
+const weekdaysShort = weekdaysFull.map(d => d.slice(0,3));
+
+/* -----------------------------
+   Format Date (mini moment.js)
+----------------------------- */
+
 export function formatDate(date, format = "YYYY-MM-DD") {
   const d = normalizeDate(date);
   if (!d) return "";
 
-  const monthsFull = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December"
-  ];
-  const monthsShort = monthsFull.map(m => m.slice(0, 3));
-
   const tokens = {
     YYYY: d.getFullYear(),
     YY: String(d.getFullYear()).slice(-2),
+
     MMMM: monthsFull[d.getMonth()],
     MMM: monthsShort[d.getMonth()],
     MM: String(d.getMonth() + 1).padStart(2, "0"),
     M: d.getMonth() + 1,
+
     DD: String(d.getDate()).padStart(2, "0"),
     D: d.getDate(),
+
+    dddd: weekdaysFull[d.getDay()],
+    ddd: weekdaysShort[d.getDay()],
+
     HH: String(d.getHours()).padStart(2, "0"),
     H: d.getHours(),
-    hh: String((d.getHours() % 12) || 12).padStart(2, "0"),
+
+    hh: String((d.getHours() % 12) || 12).padStart(2,"0"),
     h: (d.getHours() % 12) || 12,
-    mm: String(d.getMinutes()).padStart(2, "0"),
-    ss: String(d.getSeconds()).padStart(2, "0"),
+
+    mm: String(d.getMinutes()).padStart(2,"0"),
+    ss: String(d.getSeconds()).padStart(2,"0"),
+    SSS: String(d.getMilliseconds()).padStart(3,"0"),
+
     A: d.getHours() >= 12 ? "PM" : "AM",
     a: d.getHours() >= 12 ? "pm" : "am",
   };
 
-  return Object.entries(tokens)
-    .reduce((out, [token, value]) => out.replace(token, value), format);
+  return format.replace(
+    /YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|H|hh|h|mm|ss|SSS|A|a/g,
+    token => tokens[token]
+  );
 }
 
-/**
- * Relative time with future support
- * Examples:
- * "just now", "5 minutes ago", "in 2 hours", "3 months ago"
- */
+/* -----------------------------
+   Relative Time
+----------------------------- */
+
 export function getRelativeTime(date) {
-  const now = new Date().getTime();
   const then = normalizeDate(date);
   if (!then) return "";
 
-  const diff = then.getTime() - now;
-  const absDiff = Math.abs(diff);
+  const diff = then.getTime() - Date.now();
+  const abs = Math.abs(diff);
 
-  const secs = Math.floor(absDiff / 1000);
-  const mins = Math.floor(secs / 60);
-  const hours = Math.floor(mins / 60);
+  const seconds = Math.floor(abs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
   const months = Math.floor(days / 30);
   const years = Math.floor(months / 12);
 
   const suffix = diff < 0 ? "ago" : "from now";
 
-  if (secs < 10) return "just now";
-  if (secs < 60) return `${secs} seconds ${suffix}`;
-  if (mins < 60) return `${mins} minute${mins > 1 ? "s" : ""} ${suffix}`;
-  if (hours < 24) return `${hours} hour${hours > 1 ? "s" : ""} ${suffix}`;
-  if (days < 30) return `${days} day${days > 1 ? "s" : ""} ${suffix}`;
-  if (months < 12) return `${months} month${months > 1 ? "s" : ""} ${suffix}`;
-  return `${years} year${years > 1 ? "s" : ""} ${suffix}`;
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds} seconds ${suffix}`;
+  if (minutes < 60) return `${minutes} minute${minutes>1?"s":""} ${suffix}`;
+  if (hours < 24) return `${hours} hour${hours>1?"s":""} ${suffix}`;
+  if (days < 30) return `${days} day${days>1?"s":""} ${suffix}`;
+  if (months < 12) return `${months} month${months>1?"s":""} ${suffix}`;
+  return `${years} year${years>1?"s":""} ${suffix}`;
 }
 
-/**
- * Check if date is today
- */
+/* -----------------------------
+   Date Checks
+----------------------------- */
+
 export function isToday(date) {
   const d = normalizeDate(date);
   if (!d) return false;
 
-  const today = new Date();
+  const t = new Date();
   return (
-    d.getDate() === today.getDate() &&
-    d.getMonth() === today.getMonth() &&
-    d.getFullYear() === today.getFullYear()
+    d.getDate() === t.getDate() &&
+    d.getMonth() === t.getMonth() &&
+    d.getFullYear() === t.getFullYear()
   );
 }
 
-/**
- * Check if date is yesterday
- */
 export function isYesterday(date) {
   const d = normalizeDate(date);
   if (!d) return false;
@@ -112,105 +128,137 @@ export function isYesterday(date) {
   );
 }
 
-/**
- * Check if date is in the past
- */
-export function isPast(date) {
+export function isSameDay(a,b){
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
+  if(!d1 || !d2) return false;
+
+  return (
+    d1.getDate() === d2.getDate() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getFullYear() === d2.getFullYear()
+  );
+}
+
+export function isPast(date){
   const d = normalizeDate(date);
   return d ? d.getTime() < Date.now() : false;
 }
 
-/**
- * Check if date is in the future
- */
-export function isFuture(date) {
+export function isFuture(date){
   const d = normalizeDate(date);
   return d ? d.getTime() > Date.now() : false;
 }
 
-/**
- * Add days
- */
-export function addDays(date, days) {
+/* -----------------------------
+   Add Time
+----------------------------- */
+
+export function addDays(date,days){
   const d = normalizeDate(date);
-  if (!d) return null;
+  if(!d) return null;
 
-  const result = new Date(d);
-  result.setDate(result.getDate() + days);
-  return result;
+  const r = new Date(d);
+  r.setDate(r.getDate()+days);
+  return r;
 }
 
-/**
- * Add months
- */
-export function addMonths(date, months) {
+export function addMonths(date,months){
   const d = normalizeDate(date);
-  if (!d) return null;
+  if(!d) return null;
 
-  const result = new Date(d);
-  result.setMonth(result.getMonth() + months);
-  return result;
+  const r = new Date(d);
+  r.setMonth(r.getMonth()+months);
+  return r;
 }
 
-/**
- * Add years
- */
-export function addYears(date, years) {
+export function addYears(date,years){
   const d = normalizeDate(date);
-  if (!d) return null;
+  if(!d) return null;
 
-  const result = new Date(d);
-  result.setFullYear(result.getFullYear() + years);
-  return result;
+  const r = new Date(d);
+  r.setFullYear(r.getFullYear()+years);
+  return r;
 }
 
-/**
- * Difference helpers
- */
-export function diffInDays(date1, date2) {
-  const d1 = normalizeDate(date1);
-  const d2 = normalizeDate(date2);
-  if (!d1 || !d2) return NaN;
+/* -----------------------------
+   Differences
+----------------------------- */
 
-  const diff = Math.abs(d1 - d2);
-  return Math.floor(diff / (1000 * 60 * 60 * 24));
+export function diffInDays(a,b){
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
+  if(!d1 || !d2) return NaN;
+
+  return Math.floor(Math.abs(d1-d2)/(1000*60*60*24));
 }
 
-export function diffInHours(date1, date2) {
-  const d1 = normalizeDate(date1);
-  const d2 = normalizeDate(date2);
-  if (!d1 || !d2) return NaN;
+export function diffInHours(a,b){
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
+  if(!d1 || !d2) return NaN;
 
-  const diff = Math.abs(d1 - d2);
-  return Math.floor(diff / (1000 * 60 * 60));
+  return Math.floor(Math.abs(d1-d2)/(1000*60*60));
 }
 
-/**
- * Convert to ISO string without timezone offset
- */
-export function toISO(date) {
+export function diffInMinutes(a,b){
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
+  if(!d1 || !d2) return NaN;
+
+  return Math.floor(Math.abs(d1-d2)/(1000*60));
+}
+
+export function diffInSeconds(a,b){
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
+  if(!d1 || !d2) return NaN;
+
+  return Math.floor(Math.abs(d1-d2)/1000);
+}
+
+/* -----------------------------
+   ISO Format
+----------------------------- */
+
+export function toISO(date){
   const d = normalizeDate(date);
-  if (!d) return "";
+  if(!d) return "";
 
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+  return new Date(d.getTime()-d.getTimezoneOffset()*60000)
     .toISOString()
-    .slice(0, 19)
-    .replace("T", " ");
+    .slice(0,19)
+    .replace("T"," ");
 }
 
-/**
- * Start & End of day
- */
-export function startOfDay(date) {
-  const d = normalizeDate(date);
-  if (!d) return null;
+/* -----------------------------
+   Start / End
+----------------------------- */
 
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+export function startOfDay(date){
+  const d = normalizeDate(date);
+  if(!d) return null;
+
+  return new Date(d.getFullYear(),d.getMonth(),d.getDate(),0,0,0);
 }
 
-export function endOfDay(date) {
+export function endOfDay(date){
   const d = normalizeDate(date);
-  if (!d) return null;
+  if(!d) return null;
 
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+  return new Date(d.getFullYear(),d.getMonth(),d.getDate(),23,59,59);
+}
+
+export function startOfMonth(date){
+  const d = normalizeDate(date);
+  if(!d) return null;
+
+  return new Date(d.getFullYear(),d.getMonth(),1);
+}
+
+export function endOfMonth(date){
+  const d = normalizeDate(date);
+  if(!d) return null;
+
+  return new Date(d.getFullYear(),d.getMonth()+1,0,23,59,59);
 }
