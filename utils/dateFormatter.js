@@ -1,5 +1,5 @@
 /**
- * Enhanced Date Formatter Utilities v3
+ * Enhanced Date Formatter Utilities v4
  * Lightweight alternative to Moment.js / Day.js
  */
 
@@ -15,7 +15,7 @@ const MS = Object.freeze({
 });
 
 /* --------------------------------
-   Date Helpers
+   Helpers
 -------------------------------- */
 
 function normalizeDate(date) {
@@ -28,7 +28,7 @@ function clone(d){
 }
 
 /* --------------------------------
-   Locale Data
+   Locale
 -------------------------------- */
 
 const monthsFull = Object.freeze([
@@ -67,8 +67,6 @@ export function formatDate(date, format="YYYY-MM-DD"){
 
   const tz = -d.getTimezoneOffset();
   const sign = tz >= 0 ? "+" : "-";
-  const tzH = String(Math.floor(Math.abs(tz)/60)).padStart(2,"0");
-  const tzM = String(Math.abs(tz)%60).padStart(2,"0");
 
   const tokens = {
     YYYY: d.getFullYear(),
@@ -102,12 +100,54 @@ export function formatDate(date, format="YYYY-MM-DD"){
     A: d.getHours()>=12?"PM":"AM",
     a: d.getHours()>=12?"pm":"am",
 
-    Z: `${sign}${tzH}:${tzM}`
+    Z: `${sign}${String(Math.floor(Math.abs(tz)/60)).padStart(2,"0")}:${String(Math.abs(tz)%60).padStart(2,"0")}`
   };
 
   return format.replace(
     /YYYY|YY|Q|MMMM|MMM|MM|M|DD|D|dddd|ddd|W|HH|H|hh|h|mm|ss|SSS|A|a|Z/g,
-    t=>tokens[t]
+    t => tokens[t] ?? t
+  );
+}
+
+/* --------------------------------
+   Parse (NEW)
+-------------------------------- */
+
+export function parse(dateString, format="YYYY-MM-DD"){
+
+  const map = {
+    YYYY: "(\\d{4})",
+    MM: "(\\d{2})",
+    DD: "(\\d{2})",
+    HH: "(\\d{2})",
+    mm: "(\\d{2})",
+    ss: "(\\d{2})"
+  };
+
+  let regex = format;
+  Object.keys(map).forEach(t=>{
+    regex = regex.replace(t,map[t]);
+  });
+
+  const match = new RegExp("^"+regex+"$").exec(dateString);
+  if(!match) return null;
+
+  const parts = {};
+  let i=1;
+
+  Object.keys(map).forEach(t=>{
+    if(format.includes(t)){
+      parts[t]=Number(match[i++]);
+    }
+  });
+
+  return new Date(
+    parts.YYYY || 1970,
+    (parts.MM||1)-1,
+    parts.DD||1,
+    parts.HH||0,
+    parts.mm||0,
+    parts.ss||0
   );
 }
 
@@ -116,10 +156,11 @@ export function formatDate(date, format="YYYY-MM-DD"){
 -------------------------------- */
 
 export function getRelativeTime(date){
+
   const then = normalizeDate(date);
   if(!then) return "";
 
-  const diff = then.getTime() - Date.now();
+  const diff = then - Date.now();
   const abs = Math.abs(diff);
 
   const units = [
@@ -134,54 +175,17 @@ export function getRelativeTime(date){
   if(abs < 5000) return "just now";
 
   for(const [name,ms] of units){
-    const value = Math.floor(abs/ms);
-    if(value >= 1){
-      const plural = value>1?"s":"";
+    const v = Math.floor(abs/ms);
+    if(v >= 1){
       return diff<0
-        ? `${value} ${name}${plural} ago`
-        : `${value} ${name}${plural} from now`;
+        ? `${v} ${name}${v>1?"s":""} ago`
+        : `${v} ${name}${v>1?"s":""} from now`;
     }
   }
 }
 
 /* --------------------------------
-   Checks
--------------------------------- */
-
-export function isToday(date){
-  return isSameDay(date,new Date());
-}
-
-export function isYesterday(date){
-  const y = new Date();
-  y.setDate(y.getDate()-1);
-  return isSameDay(date,y);
-}
-
-export function isSameDay(a,b){
-  const d1 = normalizeDate(a);
-  const d2 = normalizeDate(b);
-  if(!d1||!d2) return false;
-
-  return (
-    d1.getDate()===d2.getDate() &&
-    d1.getMonth()===d2.getMonth() &&
-    d1.getFullYear()===d2.getFullYear()
-  );
-}
-
-export function isPast(date){
-  const d = normalizeDate(date);
-  return d ? d.getTime()<Date.now() : false;
-}
-
-export function isFuture(date){
-  const d = normalizeDate(date);
-  return d ? d.getTime()>Date.now() : false;
-}
-
-/* --------------------------------
-   Add / Subtract
+   Math
 -------------------------------- */
 
 export function add(date,{days=0,months=0,years=0}={}){
@@ -197,15 +201,20 @@ export function add(date,{days=0,months=0,years=0}={}){
   return r;
 }
 
-export const addDays=(d,n)=>add(d,{days:n});
-export const addMonths=(d,n)=>add(d,{months:n});
-export const addYears=(d,n)=>add(d,{years:n});
+export function subtract(date,opts){
+  return add(date,{
+    days: -(opts.days||0),
+    months: -(opts.months||0),
+    years: -(opts.years||0)
+  });
+}
 
 /* --------------------------------
    Differences
 -------------------------------- */
 
 export function diff(a,b,unit="day"){
+
   const d1=normalizeDate(a);
   const d2=normalizeDate(b);
   if(!d1||!d2) return NaN;
@@ -217,22 +226,28 @@ export function diff(a,b,unit="day"){
     case "minute": return Math.floor(delta/MS.minute);
     case "hour": return Math.floor(delta/MS.hour);
     case "day": return Math.floor(delta/MS.day);
-    default: return delta;
+    case "month":
+      return Math.abs(
+        (d1.getFullYear()-d2.getFullYear())*12 +
+        d1.getMonth()-d2.getMonth()
+      );
+    case "year":
+      return Math.abs(d1.getFullYear()-d2.getFullYear());
+    default:
+      return delta;
   }
 }
 
 /* --------------------------------
-   ISO Format
+   Date Info
 -------------------------------- */
 
-export function toISO(date){
-  const d = normalizeDate(date);
-  if(!d) return "";
+export function isLeapYear(year){
+  return (year%4===0 && year%100!==0) || year%400===0;
+}
 
-  return new Date(d.getTime()-d.getTimezoneOffset()*60000)
-    .toISOString()
-    .replace("T"," ")
-    .slice(0,19);
+export function daysInMonth(year,month){
+  return new Date(year,month+1,0).getDate();
 }
 
 /* --------------------------------
@@ -240,19 +255,28 @@ export function toISO(date){
 -------------------------------- */
 
 export function startOf(date,unit){
-  const d=normalizeDate(date);
+
+  const d = normalizeDate(date);
   if(!d) return null;
 
-  const r=clone(d);
+  const r = clone(d);
 
   switch(unit){
+
     case "day":
       r.setHours(0,0,0,0);
       break;
+
+    case "week":
+      r.setDate(r.getDate()-r.getDay());
+      r.setHours(0,0,0,0);
+      break;
+
     case "month":
       r.setDate(1);
       r.setHours(0,0,0,0);
       break;
+
     case "year":
       r.setMonth(0,1);
       r.setHours(0,0,0,0);
@@ -263,24 +287,33 @@ export function startOf(date,unit){
 }
 
 export function endOf(date,unit){
-  const d=startOf(date,unit);
-  if(!d) return null;
+
+  const s = startOf(date,unit);
+  if(!s) return null;
 
   switch(unit){
+
     case "day":
-      d.setHours(23,59,59,999);
+      s.setHours(23,59,59,999);
       break;
+
+    case "week":
+      s.setDate(s.getDate()+6);
+      s.setHours(23,59,59,999);
+      break;
+
     case "month":
-      d.setMonth(d.getMonth()+1);
-      d.setDate(0);
-      d.setHours(23,59,59,999);
+      s.setMonth(s.getMonth()+1);
+      s.setDate(0);
+      s.setHours(23,59,59,999);
       break;
+
     case "year":
-      d.setFullYear(d.getFullYear()+1);
-      d.setMonth(0,0);
-      d.setHours(23,59,59,999);
+      s.setFullYear(s.getFullYear()+1);
+      s.setMonth(0,0);
+      s.setHours(23,59,59,999);
       break;
   }
 
-  return d;
+  return s;
 }
