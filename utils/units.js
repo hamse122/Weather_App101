@@ -1,126 +1,137 @@
 /**
- * Weather / Unit Utilities
- * Small, dependency-free helpers for temperature, speed, and rounding
+ * Advanced Fetch JSON Utility
  */
 
-/* ---------- CONSTANTS ---------- */
-
-const KELVIN_OFFSET = 273.15;
-const MS_TO_KMH = 3.6;
-const KMH_TO_MS = 1 / 3.6;
-
-/* ---------- INTERNAL VALIDATION ---------- */
-
-function isValidNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
+class FetchError extends Error {
+  constructor(message, { status, url, body }) {
+    super(message);
+    this.name = "FetchError";
+    this.status = status;
+    this.url = url;
+    this.body = body;
+  }
 }
 
-/* ---------- TEMPERATURE ---------- */
+/* --------------------------------
+   Helpers
+-------------------------------- */
 
-/**
- * Kelvin → Celsius
- * @param {number} kelvin
- * @returns {number|null}
- */
-function toCelsius(kelvin) {
-  if (!isValidNumber(kelvin)) return null;
-  return kelvin - KELVIN_OFFSET;
+function buildUrl(url, params) {
+  if (!params) return url;
+
+  const u = new URL(url);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null) {
+      u.searchParams.append(k, v);
+    }
+  });
+
+  return u.toString();
 }
 
-/**
- * Celsius → Fahrenheit
- * @param {number} celsius
- * @returns {number|null}
- */
-function toFahrenheit(celsius) {
-  if (!isValidNumber(celsius)) return null;
-  return (celsius * 9) / 5 + 32;
+async function parseBody(res) {
+  const contentType = res.headers?.get?.("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    return res.json();
+  }
+
+  return res.text();
 }
 
-/**
- * Kelvin → Fahrenheit
- * @param {number} kelvin
- * @returns {number|null}
- */
-function kelvinToFahrenheit(kelvin) {
-  if (!isValidNumber(kelvin)) return null;
-  return toFahrenheit(toCelsius(kelvin));
+/* --------------------------------
+   Core Request
+-------------------------------- */
+
+async function fetchJson(url, options = {}) {
+
+  const {
+    method = "GET",
+    headers = {},
+    body,
+    params,
+    timeout = 10000,
+    retries = 0
+  } = options;
+
+  const finalUrl = buildUrl(url, params);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+
+    const res = await fetch(finalUrl, {
+      method,
+      headers: {
+        "Accept": "application/json",
+        ...headers
+      },
+      body:
+        body && typeof body === "object"
+          ? JSON.stringify(body)
+          : body,
+      signal: controller.signal
+    });
+
+    clearTimeout(timer);
+
+    const parsedBody = await parseBody(res);
+
+    if (!res.ok) {
+      const message =
+        parsedBody?.message ||
+        parsedBody ||
+        `Request failed (${res.status})`;
+
+      throw new FetchError(message, {
+        status: res.status,
+        url: finalUrl,
+        body: parsedBody
+      });
+    }
+
+    return parsedBody;
+
+  } catch (err) {
+
+    if (retries > 0) {
+      return fetchJson(url, { ...options, retries: retries - 1 });
+    }
+
+    if (err.name === "AbortError") {
+      throw new FetchError("Request timeout", { url });
+    }
+
+    throw err;
+  }
 }
 
-/**
- * Celsius → Kelvin
- * @param {number} celsius
- * @returns {number|null}
- */
-function toKelvin(celsius) {
-  if (!isValidNumber(celsius)) return null;
-  return celsius + KELVIN_OFFSET;
-}
+/* --------------------------------
+   HTTP Helpers
+-------------------------------- */
 
-/* ---------- SPEED ---------- */
+const get = (url, options = {}) =>
+  fetchJson(url, { ...options, method: "GET" });
 
-/**
- * m/s → km/h
- * @param {number} ms
- * @returns {number|null}
- */
-function msToKmh(ms) {
-  if (!isValidNumber(ms)) return null;
-  return ms * MS_TO_KMH;
-}
+const post = (url, body, options = {}) =>
+  fetchJson(url, { ...options, method: "POST", body });
 
-/**
- * km/h → m/s
- * @param {number} kmh
- * @returns {number|null}
- */
-function kmhToMs(kmh) {
-  if (!isValidNumber(kmh)) return null;
-  return kmh * KMH_TO_MS;
-}
+const put = (url, body, options = {}) =>
+  fetchJson(url, { ...options, method: "PUT", body });
 
-/* ---------- ROUNDING ---------- */
+const del = (url, options = {}) =>
+  fetchJson(url, { ...options, method: "DELETE" });
 
-/**
- * Round number with safe decimal limits
- * @param {number} value
- * @param {number} decimals
- * @returns {number|null}
- */
-function round(value, decimals = 0) {
-  if (!isValidNumber(value)) return null;
-
-  const d = Math.max(0, Math.min(10, decimals | 0));
-  const factor = 10 ** d;
-
-  return Math.round(value * factor) / factor;
-}
-
-/**
- * Round and format number
- * @param {number} value
- * @param {number} decimals
- * @returns {string|null}
- */
-function format(value, decimals = 2) {
-  const r = round(value, decimals);
-  return r === null ? null : r.toFixed(decimals);
-}
-
-/* ---------- EXPORTS ---------- */
+/* --------------------------------
+   Export
+-------------------------------- */
 
 module.exports = {
-  // temperature
-  toCelsius,
-  toFahrenheit,
-  toKelvin,
-  kelvinToFahrenheit,
-
-  // speed
-  msToKmh,
-  kmhToMs,
-
-  // numbers
-  round,
-  format
+  fetchJson,
+  get,
+  post,
+  put,
+  del,
+  FetchError
 };
