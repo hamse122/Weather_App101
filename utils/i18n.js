@@ -1,67 +1,108 @@
 /**
- * Enterprise Internationalization (i18n) Utility
- * Features:
- * - Nested key resolution (dot notation)
- * - Multi-level fallback chain
- * - Deep merge
- * - Async loading with protection
- * - Smart caching
- * - Pluralization
- * - Namespaces
- * - Locale normalization
- * - Strict mode
+ * Enterprise I18n Utility v2 (Advanced)
  */
+
+class LRUCache {
+    constructor(limit = 500) {
+        this.limit = limit;
+        this.map = new Map();
+    }
+
+    get(key) {
+        if (!this.map.has(key)) return;
+        const val = this.map.get(key);
+        this.map.delete(key);
+        this.map.set(key, val);
+        return val;
+    }
+
+    set(key, val) {
+        if (this.map.has(key)) this.map.delete(key);
+        this.map.set(key, val);
+
+        if (this.map.size > this.limit) {
+            const first = this.map.keys().next().value;
+            this.map.delete(first);
+        }
+    }
+
+    clear() {
+        this.map.clear();
+    }
+}
 
 export class I18n {
     constructor(options = {}) {
         this.translations = new Map();
-        this.currentLocale = options.defaultLocale || "en";
 
+        this.currentLocale = options.defaultLocale || "en";
         this.fallbackChain = options.fallbackChain || ["en"];
+
+        this.strict = options.strict || false;
         this.listeners = [];
 
-        this.cache = new Map();
-        this.strict = options.strict || false;
+        this.cache = new LRUCache(options.cacheSize || 500);
 
-        this.cacheTTL = options.cacheTTL || null; // optional TTL in ms
-        this.cacheTimestamps = new Map();
+        this.loadingPromises = new Map(); // dedupe async loads
 
-        this.loadingLocales = new Set();
+        this.onMissingKey = options.onMissingKey || null;
     }
 
     /* ---------------------------------- */
-    /* Utilities                          */
+    /* Locale                             */
     /* ---------------------------------- */
 
     static normalizeLocale(locale) {
         if (!locale) return "en";
-        return locale.toLowerCase().split("-")[0]; // en-US → en
+        return locale.toLowerCase();
     }
 
+    static splitLocale(locale) {
+        const [lang, region] = locale.split("-");
+        return [locale, lang].filter(Boolean);
+    }
+
+    /* ---------------------------------- */
+    /* Deep Merge                         */
+    /* ---------------------------------- */
+
     static deepMerge(target, source) {
-        for (const key of Object.keys(source)) {
-            if (
-                source[key] &&
-                typeof source[key] === "object" &&
-                !Array.isArray(source[key])
-            ) {
-                if (!target[key]) target[key] = {};
-                this.deepMerge(target[key], source[key]);
+        for (const key in source) {
+            const val = source[key];
+
+            if (val && typeof val === "object" && !Array.isArray(val)) {
+                target[key] = target[key] || {};
+                this.deepMerge(target[key], val);
             } else {
-                target[key] = source[key];
+                target[key] = val;
             }
         }
         return target;
     }
 
-    static getNestedValue(obj, path) {
-        return path.split(".").reduce((acc, key) => acc?.[key], obj);
+    /* ---------------------------------- */
+    /* Fast Path Resolver (compiled)      */
+    /* ---------------------------------- */
+
+    static compilePath(path) {
+        const parts = path.split(".");
+        return obj => {
+            let cur = obj;
+            for (const p of parts) {
+                if (!cur) return undefined;
+                cur = cur[p];
+            }
+            return cur;
+        };
     }
 
+    /* ---------------------------------- */
+    /* Interpolation                      */
+    /* ---------------------------------- */
+
     static interpolate(str, params) {
-        return str.replace(/\{\{([\w.]+)\}\}/g, (_, key) => {
-            const value = I18n.getNestedValue(params, key);
-            return value !== undefined ? value : `{{${key}}}`;
+        return str.replace(/\{\{(.*?)\}\}/g, (_, key) => {
+            return key.split(".").reduce((acc, k) => acc?.[k], params) ?? `{{${key}}}`;
         });
     }
 
@@ -69,15 +110,11 @@ export class I18n {
     /* Translation Management             */
     /* ---------------------------------- */
 
-    addTranslations(locale, translations) {
+    addTranslations(locale, data) {
         locale = I18n.normalizeLocale(locale);
 
-        if (!this.translations.has(locale)) {
-            this.translations.set(locale, {});
-        }
-
-        const existing = this.translations.get(locale);
-        const merged = I18n.deepMerge(existing, translations);
+        const existing = this.translations.get(locale) || {};
+        const merged = I18n.deepMerge(existing, data);
 
         this.translations.set(locale, merged);
         this.cache.clear();
@@ -86,73 +123,64 @@ export class I18n {
     async load(locale, loaderFn) {
         locale = I18n.normalizeLocale(locale);
 
-        if (this.loadingLocales.has(locale)) return;
-        this.loadingLocales.add(locale);
-
-        try {
-            const loaded = await loaderFn();
-            this.addTranslations(locale, loaded);
-        } finally {
-            this.loadingLocales.delete(locale);
+        if (this.loadingPromises.has(locale)) {
+            return this.loadingPromises.get(locale);
         }
+
+        const promise = loaderFn().then(data => {
+            this.addTranslations(locale, data);
+            this.loadingPromises.delete(locale);
+        });
+
+        this.loadingPromises.set(locale, promise);
+        return promise;
     }
 
     setLocale(locale) {
         locale = I18n.normalizeLocale(locale);
-
-        if (!this.translations.has(locale)) {
-            console.warn(`⚠ Locale "${locale}" not loaded.`);
-        }
-
         this.currentLocale = locale;
         this.cache.clear();
         this.notifyListeners(locale);
-    }
-
-    setFallbackChain(localesArray) {
-        if (!Array.isArray(localesArray)) {
-            throw new Error("Fallback chain must be array.");
-        }
-
-        this.fallbackChain = [
-            ...new Set(localesArray.map(I18n.normalizeLocale)),
-        ];
-
-        this.cache.clear();
     }
 
     /* ---------------------------------- */
     /* Core Resolver                      */
     /* ---------------------------------- */
 
-    _resolveKey(key) {
-        const now = Date.now();
+    _resolve(key) {
+        const cached = this.cache.get(key);
+        if (cached !== undefined) return cached;
 
-        if (this.cache.has(key)) {
-            if (
-                !this.cacheTTL ||
-                now - this.cacheTimestamps.get(key) < this.cacheTTL
-            ) {
-                return this.cache.get(key);
-            }
+        // namespace support: ns:key.path
+        let namespace = null;
+        let path = key;
+
+        if (key.includes(":")) {
+            [namespace, path] = key.split(":");
         }
 
-        const searchLocales = [
-            this.currentLocale,
-            ...this.fallbackChain,
-        ].filter((v, i, arr) => arr.indexOf(v) === i);
+        const locales = [
+            ...I18n.splitLocale(this.currentLocale),
+            ...this.fallbackChain
+        ];
 
-        for (const locale of searchLocales) {
-            const translations = this.translations.get(locale);
-            if (!translations) continue;
+        const resolver = I18n.compilePath(path);
 
-            const value = I18n.getNestedValue(translations, key);
+        for (const locale of locales) {
+            const data = this.translations.get(locale);
+            if (!data) continue;
+
+            const source = namespace ? data[namespace] : data;
+            const value = resolver(source);
 
             if (value !== undefined) {
                 this.cache.set(key, value);
-                this.cacheTimestamps.set(key, now);
                 return value;
             }
+        }
+
+        if (this.onMissingKey) {
+            this.onMissingKey(key, this.currentLocale);
         }
 
         if (this.strict) {
@@ -163,21 +191,28 @@ export class I18n {
     }
 
     /* ---------------------------------- */
-    /* Pluralization                      */
+    /* Pluralization (Intl powered)       */
     /* ---------------------------------- */
 
-    _handlePlural(resolved, params) {
-        if (typeof resolved !== "object" || resolved === null) {
-            return resolved;
-        }
+    _plural(value, count) {
+        if (typeof value !== "object") return value;
 
-        const count = params.count;
+        const pr = new Intl.PluralRules(this.currentLocale);
+        const rule = pr.select(count);
 
-        if (count === 0 && resolved.zero) return resolved.zero;
-        if (count === 1 && resolved.one) return resolved.one;
-        if (count > 1 && resolved.other) return resolved.other;
+        return value[rule] ?? value.other;
+    }
 
-        return resolved.other || resolved.one || resolved.zero;
+    /* ---------------------------------- */
+    /* Formatting (NEW)
+    ---------------------------------- */
+
+    formatNumber(num, options) {
+        return new Intl.NumberFormat(this.currentLocale, options).format(num);
+    }
+
+    formatDate(date, options) {
+        return new Intl.DateTimeFormat(this.currentLocale, options).format(date);
     }
 
     /* ---------------------------------- */
@@ -185,56 +220,41 @@ export class I18n {
     /* ---------------------------------- */
 
     t(key, params = {}) {
-        let resolved = this._resolveKey(key);
+        let value = this._resolve(key);
 
-        resolved = this._handlePlural(resolved, params);
-
-        if (typeof resolved !== "string") {
-            return resolved;
+        if (params.count !== undefined) {
+            value = this._plural(value, params.count);
         }
 
-        return I18n.interpolate(resolved, params);
+        if (typeof value !== "string") return value;
+
+        return I18n.interpolate(value, params);
     }
 
     has(key) {
-        return this._resolveKey(key) !== key;
+        return this._resolve(key) !== key;
     }
 
-    getAll() {
-        return (
-            this.translations.get(this.currentLocale) ||
-            this.translations.get(this.fallbackChain[0]) ||
-            {}
-        );
-    }
-
-    subscribe(listener) {
-        this.listeners.push(listener);
+    subscribe(fn) {
+        this.listeners.push(fn);
         return () => {
-            const index = this.listeners.indexOf(listener);
-            if (index > -1) this.listeners.splice(index, 1);
+            this.listeners = this.listeners.filter(f => f !== fn);
         };
     }
 
     notifyListeners(locale) {
-        const data = {
-            locale,
-            translations: this.getAll(),
-        };
-        this.listeners.forEach((fn) => fn(data));
-    }
-
-    getAvailableLocales() {
-        return Array.from(this.translations.keys());
+        this.listeners.forEach(fn => fn(locale));
     }
 
     clearCache() {
         this.cache.clear();
-        this.cacheTimestamps.clear();
     }
 }
 
-// Global instance
+/* ---------------------------------- */
+/* Global Instance                    */
+/* ---------------------------------- */
+
 export const i18n = new I18n({
     defaultLocale: "en",
     fallbackChain: ["en"],
