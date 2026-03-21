@@ -1,141 +1,168 @@
 /**
- * Animation Utility Functions (Upgraded)
- * Robust, cancelable, and production-ready
+ * Animation Utility Functions (v3 - Advanced)
  */
 
 /* -------------------- Helpers -------------------- */
 
-/**
- * Clamp a number between min and max
- */
 export function clamp(value, min = 0, max = 1) {
   return Math.min(Math.max(value, min), max);
 }
 
-/**
- * Linear interpolation
- */
 export function lerp(start, end, t) {
   return start + (end - start) * clamp(t);
 }
 
-/**
- * requestAnimationFrame fallback
- */
+/* -------------------- RAF -------------------- */
+
 const raf =
-  window.requestAnimationFrame ||
+  window.requestAnimationFrame?.bind(window) ||
   ((cb) => setTimeout(() => cb(performance.now()), 16));
+
+const caf =
+  window.cancelAnimationFrame?.bind(window) ||
+  clearTimeout;
 
 /* -------------------- Easing -------------------- */
 
 export const easing = {
   linear: (t) => t,
-
-  easeInCubic: (t) => t * t * t,
-
-  easeOutCubic: (t) => 1 - Math.pow(1 - t, 3),
-
+  easeInCubic: (t) => t ** 3,
+  easeOutCubic: (t) => 1 - (1 - t) ** 3,
   easeInOutCubic: (t) =>
     t < 0.5
-      ? 4 * t * t * t
-      : 1 - Math.pow(-2 * t + 2, 3) / 2,
+      ? 4 * t ** 3
+      : 1 - ((-2 * t + 2) ** 3) / 2,
 };
 
 /* -------------------- Core Animation -------------------- */
 
-/**
- * Animate a value over time (Cancelable)
- */
 export function animate({
-  from,
-  to,
+  from = 0,
+  to = 1,
   duration = 300,
+  delay = 0,
   easingFn = easing.linear,
+  loop = 0, // number or Infinity
+  direction = 'normal', // normal | reverse | alternate
   onUpdate,
   onComplete,
-}) {
+} = {}) {
   let startTime = null;
+  let frameId = null;
+  let paused = false;
   let cancelled = false;
+  let loopsDone = 0;
+  let reversed = direction === 'reverse';
 
-  function loop(now) {
-    if (cancelled) return;
+  let pauseTime = 0;
 
-    if (!startTime) startTime = now;
+  const promise = new Promise((resolve) => {
+    function loopFrame(now) {
+      if (cancelled) return;
 
-    const elapsed = now - startTime;
-    const progress = clamp(elapsed / duration);
-    const eased = easingFn(progress);
-    const value = lerp(from, to, eased);
+      if (paused) {
+        frameId = raf(loopFrame);
+        return;
+      }
 
-    onUpdate?.(value);
+      if (!startTime) startTime = now;
 
-    if (progress < 1) {
-      raf(loop);
-    } else {
-      onComplete?.();
+      const elapsed = now - startTime - delay;
+
+      if (elapsed < 0) {
+        frameId = raf(loopFrame);
+        return;
+      }
+
+      let progress = clamp(elapsed / duration);
+      let eased = easingFn(progress);
+
+      const t = reversed ? 1 - eased : eased;
+      const value = lerp(from, to, t);
+
+      onUpdate?.(value, progress);
+
+      if (progress < 1) {
+        frameId = raf(loopFrame);
+      } else {
+        loopsDone++;
+
+        if (loopsDone < loop || loop === Infinity) {
+          startTime = null;
+
+          if (direction === 'alternate') {
+            reversed = !reversed;
+          }
+
+          frameId = raf(loopFrame);
+        } else {
+          onComplete?.();
+          resolve();
+        }
+      }
     }
-  }
 
-  raf(loop);
+    frameId = raf(loopFrame);
+  });
 
   return {
+    promise,
+
     cancel() {
       cancelled = true;
+      caf(frameId);
+    },
+
+    pause() {
+      if (!paused) {
+        paused = true;
+      }
+    },
+
+    resume() {
+      if (paused) {
+        paused = false;
+      }
     },
   };
 }
 
 /* -------------------- DOM Animations -------------------- */
 
-/**
- * Fade in element
- */
-export function fadeIn(element, duration = 300) {
-  if (!element) return Promise.resolve();
+export function fadeIn(el, duration = 300) {
+  if (!el) return Promise.resolve();
 
-  element.style.opacity = '0';
-  element.style.display ||= 'block';
+  el.style.opacity = '0';
+  el.style.display ||= 'block';
 
-  return new Promise((resolve) => {
-    animate({
-      from: 0,
-      to: 1,
-      duration,
-      easingFn: easing.easeInOutCubic,
-      onUpdate: (v) => (element.style.opacity = v),
-      onComplete: resolve,
-    });
-  });
+  return animate({
+    from: 0,
+    to: 1,
+    duration,
+    easingFn: easing.easeInOutCubic,
+    onUpdate: (v) => (el.style.opacity = v),
+  }).promise;
 }
 
-/**
- * Fade out element
- */
-export function fadeOut(element, duration = 300) {
-  if (!element) return Promise.resolve();
+export function fadeOut(el, duration = 300) {
+  if (!el) return Promise.resolve();
 
-  return new Promise((resolve) => {
-    animate({
-      from: 1,
-      to: 0,
-      duration,
-      easingFn: easing.easeInOutCubic,
-      onUpdate: (v) => (element.style.opacity = v),
-      onComplete: () => {
-        element.style.display = 'none';
-        resolve();
-      },
-    });
-  });
+  return animate({
+    from: 1,
+    to: 0,
+    duration,
+    easingFn: easing.easeInOutCubic,
+    onUpdate: (v) => (el.style.opacity = v),
+    onComplete: () => {
+      el.style.display = 'none';
+    },
+  }).promise;
 }
 
-/**
- * Slide Y animation (extra utility)
- */
-export function slideY(element, from, to, duration = 300) {
-  if (!element) return;
+export function slideY(el, from, to, duration = 300) {
+  if (!el) return;
 
-  element.style.willChange = 'transform';
+  el.style.willChange = 'transform';
 
   return animate({
     from,
@@ -143,10 +170,10 @@ export function slideY(element, from, to, duration = 300) {
     duration,
     easingFn: easing.easeOutCubic,
     onUpdate: (v) => {
-      element.style.transform = `translateY(${v}px)`;
+      el.style.transform = `translate3d(0, ${v}px, 0)`;
     },
     onComplete: () => {
-      element.style.willChange = 'auto';
+      el.style.willChange = 'auto';
     },
   });
 }
