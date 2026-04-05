@@ -1,15 +1,26 @@
+/**
+ * Advanced EventEmitter v3
+ * - Listener metadata (priority, once)
+ * - High-performance internal storage
+ * - Safe async + sync emit pipelines
+ * - Any listeners
+ * - Error capturing & forwarding
+ * - Listener warnings
+ */
+
 class EventEmitter {
     constructor(options = {}) {
-        this.events = new Map();
-        this.anyListeners = new Set();
+        this.events = new Map();               // { event: [ { fn, once, priority } ] }
+        this.anyListeners = new Set();         // for onAny
         this.maxListeners = options.maxListeners || 10;
         this.captureErrors = options.captureErrors ?? true;
+        this.profile = options.profile ?? false;
     }
 
-    /* =========================
+    /* ============================================
        Internal Helpers
-    ========================= */
-    _getListeners(event) {
+    ============================================ */
+    _getStore(event) {
         if (!this.events.has(event)) {
             this.events.set(event, []);
         }
@@ -20,66 +31,73 @@ class EventEmitter {
         const count = this.listenerCount(event);
         if (count > this.maxListeners) {
             console.warn(
-                `[EventEmitter] Possible memory leak detected. ` +
-                `${count} listeners added for "${event}".`
+                `[EventEmitter] Warning: ${count} listeners attached to "${event}". Potential memory leak.`
             );
         }
     }
 
-    /* =========================
-       Core API
-    ========================= */
-    on(event, listener) {
-        this._getListeners(event).push(listener);
+    _addListener(event, fn, once = false, prepend = false, priority = 0) {
+        const store = this._getStore(event);
+        const meta = { fn, once, priority };
+
+        if (prepend) store.unshift(meta);
+        else {
+            // Insert by priority
+            let i = store.length;
+            while (i > 0 && store[i - 1].priority > priority) i--;
+            store.splice(i, 0, meta);
+        }
+
         this._warnIfExceeded(event);
         return this;
+    }
+
+    /* ============================================
+       Core API
+    ============================================ */
+    on(event, listener, options = {}) {
+        return this._addListener(event, listener, false, false, options.priority ?? 0);
     }
 
     prependListener(event, listener) {
-        this._getListeners(event).unshift(listener);
-        this._warnIfExceeded(event);
-        return this;
+        return this._addListener(event, listener, false, true);
     }
 
-    once(event, listener) {
-        const wrapper = (...args) => {
-            this.off(event, wrapper);
-            listener(...args);
-        };
-        wrapper._once = true;
-        return this.on(event, wrapper);
+    once(event, listener, options = {}) {
+        return this._addListener(event, listener, true, false, options.priority ?? 0);
     }
 
     prependOnceListener(event, listener) {
-        const wrapper = (...args) => {
-            this.off(event, wrapper);
-            listener(...args);
-        };
-        wrapper._once = true;
-        return this.prependListener(event, wrapper);
+        return this._addListener(event, listener, true, true);
     }
 
-    off(event, listenerToRemove) {
-        if (!this.events.has(event)) return this;
+    off(event, fn) {
+        const store = this.events.get(event);
+        if (!store) return this;
 
-        const listeners = this.events
-            .get(event)
-            .filter(l => l !== listenerToRemove);
-
-        listeners.length
-            ? this.events.set(event, listeners)
-            : this.events.delete(event);
+        const filtered = store.filter(meta => meta.fn !== fn);
+        filtered.length ? this.events.set(event, filtered) : this.events.delete(event);
 
         return this;
     }
 
+    /* ============================================
+       Emit (Sync)
+    ============================================ */
     emit(event, ...args) {
-        const listeners = this.events.get(event);
-        if (!listeners && this.anyListeners.size === 0) return false;
+        const store = this.events.get(event);
+        const anyListeners = [...this.anyListeners];
+        if (!store && anyListeners.length === 0) return false;
 
-        const safeCall = fn => {
+        const start = this.profile ? performance.now() : 0;
+
+        // Copy to avoid mutation during iteration
+        const listeners = store ? [...store] : [];
+
+        for (const meta of listeners) {
             try {
-                fn(...args);
+                meta.fn(...args);
+                if (meta.once) this.off(event, meta.fn);
             } catch (err) {
                 if (this.captureErrors && event !== "error") {
                     this.emit("error", err);
@@ -87,33 +105,58 @@ class EventEmitter {
                     throw err;
                 }
             }
-        };
+        }
 
-        listeners && [...listeners].forEach(safeCall);
-        this.anyListeners.forEach(fn => safeCall(fn.bind(null, event)));
+        // Any listeners
+        for (const fn of anyListeners) {
+            try {
+                fn(event, ...args);
+            } catch (err) {
+                if (this.captureErrors) this.emit("error", err);
+                else throw err;
+            }
+        }
+
+        if (this.profile) {
+            console.log(`[EventEmitter] Event "${event}" took ${(performance.now() - start).toFixed(2)}ms`);
+        }
 
         return true;
     }
 
+    /* ============================================
+       Emit Async (Promise)
+    ============================================ */
     async emitAsync(event, ...args) {
-        const listeners = this.events.get(event) || [];
+        const store = this.events.get(event) || [];
         const tasks = [];
 
-        for (const listener of listeners) {
-            tasks.push(Promise.resolve(listener(...args)));
+        for (const meta of [...store]) {
+            const task = Promise.resolve()
+                .then(() => meta.fn(...args))
+                .catch(err => {
+                    if (this.captureErrors && event !== "error") {
+                        this.emit("error", err);
+                    } else {
+                        throw err;
+                    }
+                });
+
+            tasks.push(task);
+            if (meta.once) this.off(event, meta.fn);
         }
 
-        for (const listener of this.anyListeners) {
-            tasks.push(Promise.resolve(listener(event, ...args)));
+        for (const fn of this.anyListeners) {
+            tasks.push(Promise.resolve(fn(event, ...args)));
         }
 
         await Promise.all(tasks);
         return true;
     }
 
-    /* =========================
+    /* ============================================
        Global / Utility
-    ========================= */
+    ============================================ */
     onAny(listener) {
         this.anyListeners.add(listener);
         return this;
@@ -142,15 +185,15 @@ class EventEmitter {
         return this;
     }
 
-    /* =========================
-       Aliases (Node.js compatible)
-    ========================= */
-    addListener(event, listener) {
-        return this.on(event, listener);
+    /* ============================================
+       Aliases (Node.js compatibility)
+    ============================================ */
+    addListener(event, fn) {
+        return this.on(event, fn);
     }
 
-    removeListener(event, listener) {
-        return this.off(event, listener);
+    removeListener(event, fn) {
+        return this.off(event, fn);
     }
 }
 
