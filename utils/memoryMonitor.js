@@ -7,7 +7,6 @@
  * - Adaptive thresholds
  * - Peak tracking
  */
-
 export class MemoryMonitor {
 
     constructor(options = {}) {
