@@ -1,91 +1,142 @@
 /**
- * Environment Variable Utilities v2
- * Safe environment loader for Node.js
+ * Environment Variable Utilities v3
+ * Hardened env loader with strict validation, type-safe getters,
+ * and rich error diagnostics.
  */
 
-/* --------------------------------
-   Error
--------------------------------- */
-
 class EnvError extends Error {
-  constructor(message, envVar) {
+  constructor(message, envVar, details = {}) {
     super(message);
     this.name = "EnvError";
-    this.code = "MISSING_ENV";
+    this.code = "ENV_VALIDATION_ERROR";
     this.envVar = envVar;
+    this.details = details;
   }
 }
 
-/* --------------------------------
+/* --------------------------------------------------------
    Helpers
--------------------------------- */
+-------------------------------------------------------- */
 
 function readEnv(name) {
-  const value = process.env[name];
-  if (typeof value !== "string") return undefined;
+  const raw = process.env[name];
 
-  const trimmed = value.trim();
+  if (typeof raw !== "string") return undefined;
+
+  const trimmed = raw.trim();
   return trimmed === "" ? undefined : trimmed;
 }
 
-/* --------------------------------
-   Required Env
--------------------------------- */
+function throwMissing(name) {
+  throw new EnvError(`Missing required environment variable: ${name}`, name, {
+    expected: "non-empty string",
+    received: "undefined or empty"
+  });
+}
+
+/* --------------------------------------------------------
+   Required / Optional
+-------------------------------------------------------- */
 
 function requireEnv(name) {
   const value = readEnv(name);
-
-  if (value === undefined) {
-    throw new EnvError(`Missing required environment variable: ${name}`, name);
-  }
-
+  if (value === undefined) throwMissing(name);
   return value;
 }
-
-/* --------------------------------
-   Optional Env
--------------------------------- */
 
 function getEnv(name, defaultValue = undefined) {
   const value = readEnv(name);
   return value === undefined ? defaultValue : value;
 }
 
-/* --------------------------------
-   Typed Getters
--------------------------------- */
+/* --------------------------------------------------------
+   Type Helpers
+-------------------------------------------------------- */
 
-function getNumber(name, defaultValue) {
-  const value = readEnv(name);
+function getInt(name, defaultValue) {
+  const v = readEnv(name);
+  if (v === undefined) return defaultValue;
 
-  if (value === undefined) return defaultValue;
+  const n = Number(v);
 
-  const num = Number(value);
-  if (!Number.isFinite(num)) {
-    throw new EnvError(`Environment variable ${name} must be a number`, name);
+  if (!Number.isInteger(n)) {
+    throw new EnvError(
+      `Environment variable ${name} must be an integer`,
+      name,
+      { expected: "integer", received: v }
+    );
   }
 
-  return num;
+  return n;
+}
+
+function getFloat(name, defaultValue) {
+  const v = readEnv(name);
+  if (v === undefined) return defaultValue;
+
+  const n = Number(v);
+
+  if (!Number.isFinite(n)) {
+    throw new EnvError(
+      `Environment variable ${name} must be a finite number`,
+      name,
+      { expected: "finite number", received: v }
+    );
+  }
+
+  return n;
 }
 
 function getBoolean(name, defaultValue = false) {
-  const value = readEnv(name);
+  const v = readEnv(name);
+  if (v === undefined) return defaultValue;
 
-  if (value === undefined) return defaultValue;
-
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+  return ["1", "true", "yes", "on"].includes(v.toLowerCase());
 }
 
-function getList(name, separator = ",") {
-  const value = readEnv(name);
-  if (!value) return [];
+function getList(name, separator = ",", defaultValue = []) {
+  const v = readEnv(name);
+  if (!v) return defaultValue;
 
-  return value.split(separator).map(v => v.trim()).filter(Boolean);
+  return v
+    .split(separator)
+    .map(x => x.trim())
+    .filter(Boolean);
 }
 
-/* --------------------------------
+function getJson(name, defaultValue) {
+  const v = readEnv(name);
+  if (v === undefined) return defaultValue;
+
+  try {
+    return JSON.parse(v);
+  } catch (err) {
+    throw new EnvError(
+      `Environment variable ${name} contains invalid JSON`,
+      name,
+      { received: v }
+    );
+  }
+}
+
+function getUrl(name, defaultValue) {
+  const v = readEnv(name);
+  if (v === undefined) return defaultValue;
+
+  try {
+    return new URL(v);
+  } catch {
+    throw new EnvError(
+      `Environment variable ${name} must contain a valid URL`,
+      name,
+      { received: v }
+    );
+  }
+}
+
+/* --------------------------------------------------------
    Validators
--------------------------------- */
+-------------------------------------------------------- */
 
 function requireOneOf(name, allowed) {
   const value = requireEnv(name);
@@ -93,23 +144,71 @@ function requireOneOf(name, allowed) {
   if (!allowed.includes(value)) {
     throw new EnvError(
       `Invalid value for ${name}. Allowed: ${allowed.join(", ")}`,
-      name
+      name,
+      { expected: allowed, received: value }
     );
   }
 
   return value;
 }
 
-/* --------------------------------
-   Export
--------------------------------- */
+function requireUrl(name) {
+  const v = requireEnv(name);
+  try {
+    return new URL(v);
+  } catch {
+    throw new EnvError(`Invalid URL: ${name}`, name, { received: v });
+  }
+}
+
+/* --------------------------------------------------------
+   Debug / Inspection Tools
+-------------------------------------------------------- */
+
+function ensureAll(requiredKeys = []) {
+  const missing = requiredKeys.filter(k => readEnv(k) === undefined);
+
+  if (missing.length) {
+    throw new EnvError(
+      `Missing required environment variables: ${missing.join(", ")}`,
+      missing,
+      { expected: "all present" }
+    );
+  }
+
+  return true;
+}
+
+function logLoaded(prefix = "[ENV]") {
+  console.log(prefix, JSON.stringify(process.env, null, 2));
+}
+
+/* --------------------------------------------------------
+   Export API
+-------------------------------------------------------- */
 
 module.exports = {
+  // Base
   requireEnv,
   getEnv,
-  getNumber,
+
+  // Typed Getters
+  getInt,
+  getFloat,
+  getNumber: getFloat,
   getBoolean,
   getList,
+  getJson,
+  getUrl,
+
+  // Validators
   requireOneOf,
+  requireUrl,
+  ensureAll,
+
+  // Debug
+  logLoaded,
+
+  // Error
   EnvError
 };
