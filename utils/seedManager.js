@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 class SeedManager {
     constructor(databaseManager, options = {}) {
         if (!databaseManager) {
@@ -6,17 +8,21 @@ class SeedManager {
 
         this.databaseManager = databaseManager;
         this.seeds = new Map();
+
         this.tableName = options.tableName || '_seeds';
+        this.lockTable = options.lockTable || '_seed_lock';
+
         this.logger = options.logger || console;
+        this.retryAttempts = options.retryAttempts || 1;
     }
 
     register(seed) {
         if (!seed || typeof seed.run !== 'function' || !seed.id) {
-            throw new Error('Seed must have "id" and "run(connection)" function');
+            throw new Error('Seed must have "id" and "run(connection)"');
         }
 
         if (this.seeds.has(seed.id)) {
-            throw new Error(`Seed with id "${seed.id}" already registered`);
+            throw new Error(`Seed "${seed.id}" already registered`);
         }
 
         this.seeds.set(seed.id, seed);
@@ -29,25 +35,59 @@ class SeedManager {
         );
     }
 
-    async ensureTable(config = {}) {
-        await this.databaseManager.query(async connection => {
-            await connection.query(`
+    async ensureTables(config = {}) {
+        await this.databaseManager.query(async (conn) => {
+            await conn.query(`
                 CREATE TABLE IF NOT EXISTS ${this.tableName} (
                     id VARCHAR(255) PRIMARY KEY,
-                    applied_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    applied_at TIMESTAMP DEFAULT NOW()
                 )
+            `);
+
+            await conn.query(`
+                CREATE TABLE IF NOT EXISTS ${this.lockTable} (
+                    id INT PRIMARY KEY,
+                    locked BOOLEAN DEFAULT FALSE
+                )
+            `);
+
+            await conn.query(`
+                INSERT INTO ${this.lockTable} (id, locked)
+                VALUES (1, FALSE)
+                ON CONFLICT (id) DO NOTHING
             `);
         }, config);
     }
 
-    async appliedSeeds(config = {}) {
-        await this.ensureTable(config);
+    async acquireLock(conn) {
+        const res = await conn.query(`
+            UPDATE ${this.lockTable}
+            SET locked = TRUE
+            WHERE id = 1 AND locked = FALSE
+            RETURNING *
+        `);
 
-        return this.databaseManager.query(async connection => {
-            const result = await connection.query(
-                `SELECT id FROM ${this.tableName} ORDER BY id ASC`
+        if (res.rowCount === 0) {
+            throw new Error('Another seed process is running');
+        }
+    }
+
+    async releaseLock(conn) {
+        await conn.query(`
+            UPDATE ${this.lockTable}
+            SET locked = FALSE
+            WHERE id = 1
+        `);
+    }
+
+    async appliedSeeds(config = {}) {
+        await this.ensureTables(config);
+
+        return this.databaseManager.query(async (conn) => {
+            const res = await conn.query(
+                `SELECT id FROM ${this.tableName}`
             );
-            return result.rows.map(row => row.id);
+            return res.rows.map(r => r.id);
         }, config);
     }
 
@@ -55,75 +95,117 @@ class SeedManager {
         const {
             config = {},
             force = false,
-            only = null // array of seed IDs to run
+            only = null,
+            dryRun = false
         } = options;
 
-        await this.ensureTable(config);
+        await this.ensureTables(config);
 
         const applied = await this.appliedSeeds(config);
         let seeds = this.getSortedSeeds();
 
         if (only && Array.isArray(only)) {
-            seeds = seeds.filter(seed => only.includes(seed.id));
+            seeds = seeds.filter(s => only.includes(s.id));
         }
 
         const pending = force
             ? seeds
-            : seeds.filter(seed => !applied.includes(seed.id));
+            : seeds.filter(s => !applied.includes(s.id));
 
         const results = [];
 
-        for (const seed of pending) {
-            this.logger.info?.(`🌱 Running seed: ${seed.id}`);
+        await this.databaseManager.query(async (conn) => {
+            await this.acquireLock(conn);
 
-            await this.databaseManager.query(async connection => {
-                try {
-                    await connection.query('BEGIN');
+            try {
+                for (const seed of pending) {
+                    const start = Date.now();
 
-                    await seed.run(connection);
+                    this.logger.info?.(`🌱 Running: ${seed.id}`);
 
-                    if (!force) {
-                        await connection.query(
-                            `INSERT INTO ${this.tableName} (id) VALUES ($1)
-                             ON CONFLICT (id) DO NOTHING`,
-                            [seed.id]
-                        );
+                    if (dryRun) {
+                        results.push({ id: seed.id, status: 'dry-run' });
+                        continue;
                     }
 
-                    await connection.query('COMMIT');
-                    results.push({ id: seed.id, status: 'success' });
-                } catch (error) {
-                    await connection.query('ROLLBACK');
-                    this.logger.error?.(`❌ Seed failed: ${seed.id}`, error);
-                    throw error;
+                    let success = false;
+                    let attempt = 0;
+
+                    while (!success && attempt < this.retryAttempts) {
+                        attempt++;
+
+                        try {
+                            await conn.query('BEGIN');
+
+                            await seed.run(conn);
+
+                            if (!force) {
+                                await conn.query(
+                                    `INSERT INTO ${this.tableName} (id)
+                                     VALUES ($1)
+                                     ON CONFLICT DO NOTHING`,
+                                    [seed.id]
+                                );
+                            }
+
+                            await conn.query('COMMIT');
+
+                            success = true;
+
+                            const duration = Date.now() - start;
+
+                            results.push({
+                                id: seed.id,
+                                status: 'success',
+                                duration
+                            });
+
+                            this.logger.info?.(
+                                `✅ Done: ${seed.id} (${duration}ms)`
+                            );
+
+                        } catch (err) {
+                            await conn.query('ROLLBACK');
+
+                            this.logger.error?.(
+                                `❌ Failed (${attempt}): ${seed.id}`,
+                                err
+                            );
+
+                            if (attempt >= this.retryAttempts) {
+                                throw err;
+                            }
+                        }
+                    }
                 }
-            }, config);
-        }
 
-        return {
-            total: results.length,
-            applied: results.map(r => r.id)
-        };
-    }
-
-    async reset(options = {}) {
-        const { config = {}, dropTable = false } = options;
-
-        await this.databaseManager.query(async connection => {
-            if (dropTable) {
-                await connection.query(`DROP TABLE IF EXISTS ${this.tableName}`);
-            } else {
-                await this.ensureTable(config);
-                await connection.query(`TRUNCATE TABLE ${this.tableName}`);
+            } finally {
+                await this.releaseLock(conn);
             }
         }, config);
 
-        this.logger.warn?.('⚠️ Seed history reset');
+        return {
+            total: results.length,
+            results
+        };
+    }
+
+    async reset({ config = {}, dropTable = false } = {}) {
+        await this.databaseManager.query(async (conn) => {
+            if (dropTable) {
+                await conn.query(`DROP TABLE IF EXISTS ${this.tableName}`);
+            } else {
+                await this.ensureTables(config);
+                await conn.query(`TRUNCATE TABLE ${this.tableName}`);
+            }
+        }, config);
+
+        this.logger.warn?.('⚠️ Seeds reset');
     }
 
     async status(config = {}) {
         const applied = await this.appliedSeeds(config);
-        const all = this.getSortedSeeds().map(seed => seed.id);
+        const all = this.getSortedSeeds().map(s => s.id);
 
         return {
             total: all.length,
