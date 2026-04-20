@@ -1,8 +1,5 @@
 const { EventEmitter } = require("events");
 
-/**
- * HealthCheck Manager – v3 (Advanced Production)
- */
 class HealthCheck extends EventEmitter {
 
     constructor(options = {}) {
@@ -11,8 +8,7 @@ class HealthCheck extends EventEmitter {
         this.checks = new Map();
 
         this.timeout = options.timeout ?? 5000;
-        this.parallel = options.parallel !== false;
-        this.concurrency = options.concurrency ?? Infinity;
+        this.concurrency = options.concurrency ?? 5;
         this.cacheTTL = options.cacheTTL ?? 0;
 
         this.metrics = {
@@ -20,6 +16,7 @@ class HealthCheck extends EventEmitter {
             passes: 0,
             warns: 0,
             fails: 0,
+            totalDuration: 0,
             avgDuration: 0
         };
     }
@@ -27,38 +24,24 @@ class HealthCheck extends EventEmitter {
     register(name, checkFn, options = {}) {
 
         if (!name || typeof name !== "string")
-            throw new Error("Health check name must be string");
+            throw new Error("Name must be string");
 
         if (this.checks.has(name))
-            throw new Error(`Health check "${name}" already exists`);
-
-        if (typeof checkFn !== "function")
-            throw new Error("checkFn must be function");
+            throw new Error(`Check "${name}" exists`);
 
         this.checks.set(name, {
-
             name,
             checkFn,
-
             critical: options.critical !== false,
             tags: options.tags ?? [],
-
             timeout: options.timeout ?? this.timeout,
             retries: options.retries ?? 0,
             retryDelay: options.retryDelay ?? 0,
-
-            cooldown: options.cooldown ?? 0,
             dependsOn: options.dependsOn ?? [],
-
             lastCheckedAt: null,
             lastResult: null
         });
 
-        return this;
-    }
-
-    unregister(name) {
-        this.checks.delete(name);
         return this;
     }
 
@@ -78,12 +61,7 @@ class HealthCheck extends EventEmitter {
             );
         }
 
-        const results = this.parallel
-            ? await this.runParallel(checks)
-            : await this.runSequential(checks);
-
-        const details = {};
-        results.forEach(r => details[r.name] = r);
+        const results = await this.runQueue(checks);
 
         this.metrics.totalRuns++;
 
@@ -91,40 +69,29 @@ class HealthCheck extends EventEmitter {
             status: this.aggregateStatus(results),
             timestamp: new Date().toISOString(),
             metrics: this.metrics,
-            details
+            details: Object.fromEntries(results.map(r => [r.name, r]))
         };
     }
 
-    async runSequential(checks) {
+    async runQueue(checks) {
 
         const results = [];
+        const queue = [...checks];
+        const workers = [];
 
-        for (const check of checks) {
-            results.push(await this.executeIfReady(check));
-        }
-
-        return results;
-    }
-
-    async runParallel(checks) {
-
-        const results = [];
-        const pool = [];
-
-        for (const check of checks) {
-
-            const task = this.executeIfReady(check)
-                .then(r => results.push(r));
-
-            pool.push(task);
-
-            if (pool.length >= this.concurrency) {
-                await Promise.race(pool);
-                pool.splice(pool.findIndex(p => p === task), 1);
+        const worker = async () => {
+            while (queue.length) {
+                const check = queue.shift();
+                const res = await this.executeIfReady(check);
+                results.push(res);
             }
+        };
+
+        for (let i = 0; i < this.concurrency; i++) {
+            workers.push(worker());
         }
 
-        await Promise.all(pool);
+        await Promise.all(workers);
         return results;
     }
 
@@ -140,16 +107,23 @@ class HealthCheck extends EventEmitter {
             return { ...check.lastResult, cached: true };
         }
 
-        if (
-            check.lastCheckedAt &&
-            now - check.lastCheckedAt < check.cooldown
-        ) {
-            return { ...check.lastResult, skipped: true };
-        }
-
+        // dependency check
         for (const dep of check.dependsOn) {
-            const depCheck = this.checks.get(dep);
-            if (depCheck?.lastResult?.status === "fail") {
+            const d = this.checks.get(dep);
+
+            if (!d) {
+                return {
+                    name: check.name,
+                    status: "fail",
+                    error: { message: `Missing dependency: ${dep}` }
+                };
+            }
+
+            if (!d.lastResult) {
+                await this.executeCheck(d);
+            }
+
+            if (d.lastResult.status === "fail") {
                 return {
                     name: check.name,
                     status: "skipped",
@@ -163,7 +137,7 @@ class HealthCheck extends EventEmitter {
 
     async executeCheck(check) {
 
-        const startedAt = Date.now();
+        const started = Date.now();
         let attempt = 0;
         let error = null;
         let status = "pass";
@@ -173,16 +147,13 @@ class HealthCheck extends EventEmitter {
         const controller = new AbortController();
 
         while (attempt <= check.retries) {
+            attempt++;
 
             try {
-
-                attempt++;
-
                 const result = await this.withTimeout(
-                    Promise.resolve().then(() =>
-                        check.checkFn({ signal: controller.signal })
-                    ),
-                    check.timeout
+                    check.checkFn({ signal: controller.signal }),
+                    check.timeout,
+                    controller
                 );
 
                 if (result === false) {
@@ -192,76 +163,77 @@ class HealthCheck extends EventEmitter {
                 break;
 
             } catch (err) {
-
                 error = err;
-
-                if (err.message.includes("timeout"))
-                    status = "timeout";
 
                 if (attempt > check.retries) {
                     status = check.critical ? "fail" : "warn";
-                } else if (check.retryDelay) {
+                } else {
                     await this.sleep(check.retryDelay);
                 }
             }
         }
 
-        const duration = Date.now() - startedAt;
+        const duration = Date.now() - started;
 
-        const output = Object.freeze({
+        const output = {
             name: check.name,
             status,
-            critical: check.critical,
             duration,
             attempts: attempt,
-            tags: [...check.tags],
             error: error
-                ? { message: error.message }
+                ? {
+                    message: error.message,
+                    stack: error.stack
+                }
                 : null,
             timestamp: new Date().toISOString()
-        });
+        };
 
         check.lastCheckedAt = Date.now();
         check.lastResult = output;
 
-        this.updateMetrics(output);
+        this.updateMetrics(duration, status);
 
-        if (status === "pass") this.emit("success", output);
-        else this.emit("failure", output);
+        this.emit(status === "pass" ? "success" : "failure", output);
 
         return output;
     }
 
-    updateMetrics(result) {
+    updateMetrics(duration, status) {
 
-        if (result.status === "pass") this.metrics.passes++;
-        if (result.status === "warn") this.metrics.warns++;
-        if (result.status === "fail") this.metrics.fails++;
+        if (status === "pass") this.metrics.passes++;
+        if (status === "warn") this.metrics.warns++;
+        if (status === "fail") this.metrics.fails++;
+
+        this.metrics.totalDuration += duration;
 
         this.metrics.avgDuration =
-            (this.metrics.avgDuration + result.duration) / 2;
+            this.metrics.totalDuration /
+            (this.metrics.passes + this.metrics.warns + this.metrics.fails);
     }
 
     aggregateStatus(results) {
 
-        if (results.some(r => r.status === "fail")) return "fail";
-        if (results.some(r => r.status === "warn")) return "warn";
-        if (results.some(r => r.status === "timeout")) return "warn";
+        if (results.some(r => r.status === "fail" && r.critical !== false))
+            return "fail";
+
+        if (results.some(r => r.status === "warn"))
+            return "warn";
 
         return "pass";
     }
 
-    async withTimeout(promise, timeout) {
+    async withTimeout(promise, timeout, controller) {
 
         let timer;
 
         return Promise.race([
             promise,
             new Promise((_, reject) => {
-                timer = setTimeout(
-                    () => reject(new Error("timeout exceeded")),
-                    timeout
-                );
+                timer = setTimeout(() => {
+                    controller.abort();
+                    reject(new Error("timeout exceeded"));
+                }, timeout);
             })
         ]).finally(() => clearTimeout(timer));
     }
@@ -272,26 +244,21 @@ class HealthCheck extends EventEmitter {
 
     isHealthy() {
         return ![...this.checks.values()]
-            .some(c => c.lastResult?.status === "fail");
+            .some(c => c.lastResult?.status === "fail" && c.critical);
     }
 
     summary() {
-
-        const out = {};
-
-        for (const [name, c] of this.checks) {
-
-            out[name] = {
-                status: c.lastResult?.status ?? "unknown",
-                lastCheckedAt: c.lastCheckedAt
-                    ? new Date(c.lastCheckedAt).toISOString()
-                    : null,
-                critical: c.critical,
-                tags: c.tags
-            };
-        }
-
-        return out;
+        return Object.fromEntries(
+            [...this.checks.entries()].map(([name, c]) => [
+                name,
+                {
+                    status: c.lastResult?.status ?? "unknown",
+                    lastCheckedAt: c.lastCheckedAt
+                        ? new Date(c.lastCheckedAt).toISOString()
+                        : null
+                }
+            ])
+        );
     }
 }
 
