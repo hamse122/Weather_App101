@@ -1,31 +1,39 @@
-/**
- * Advanced Feature Toggle System (v2 - 2026 Edition)
- * ---------------------------------------------------
- * - Global enable/disable
- * - Percentage rollout (stable hashing)
- * - User targeting
- * - Tenant targeting
- * - Environment targeting
- * - Custom sync/async rules
- * - Multivariate variants (A/B testing)
- * - Priority-based rule evaluation
- * - Exposure tracking hook
- * - Snapshot import/export
- * - In-memory evaluation cache
- * - Freeze mode
- */
-
 export class FeatureToggle {
 
-    constructor({ environment = "production", cacheTTL = 0 } = {}) {
+    constructor({
+        environment = "production",
+        cacheTTL = 0,
+        enableLogs = false
+    } = {}) {
         this.environment = environment;
-        this.cacheTTL = cacheTTL; // ms (0 = disabled)
+        this.cacheTTL = cacheTTL;
+        this.enableLogs = enableLogs;
 
         this.features = new Map();
         this.listeners = new Set();
         this.cache = new Map();
+        this.segments = new Map(); // ✅ NEW
         this.frozen = false;
+
         this.exposureHook = null;
+        this.auditLog = []; // ✅ NEW
+    }
+
+    /* ==================================================
+       SEGMENTS (Reusable targeting)
+    ================================================== */
+
+    defineSegment(name, fn) {
+        this.ensureMutable();
+        if (typeof fn !== "function") {
+            throw new Error("Segment must be a function");
+        }
+        this.segments.set(name, fn);
+    }
+
+    matchSegment(name, context) {
+        const fn = this.segments.get(name);
+        return fn ? !!fn(context) : false;
     }
 
     /* ==================================================
@@ -36,27 +44,27 @@ export class FeatureToggle {
         this.ensureMutable();
 
         if (!name || typeof name !== "string") {
-            throw new Error("Feature name must be a non-empty string");
+            throw new Error("Feature name must be a string");
         }
 
         if (this.features.has(name)) {
-            throw new Error(`Feature '${name}' already registered`);
+            throw new Error(`Feature '${name}' already exists`);
         }
-
-        const now = new Date();
 
         const feature = {
             name,
-            enabled: Boolean(options.enabled),
+            enabled: !!options.enabled,
+            rules: options.rules || [],
+            variants: options.variants || null,
             metadata: options.metadata || {},
-            rules: Array.isArray(options.rules) ? options.rules : [],
-            variants: Array.isArray(options.variants) ? options.variants : null,
-            createdAt: now,
+            killSwitch: !!options.killSwitch, // ✅ NEW
+            createdAt: new Date(),
             updatedAt: null
         };
 
         this.features.set(name, feature);
-        this.notify(name, feature.enabled, "register");
+        this.invalidateCache(name);
+
         return this;
     }
 
@@ -64,60 +72,55 @@ export class FeatureToggle {
        EVALUATION
     ================================================== */
 
-    async isActive(name, context = {}) {
-        const result = await this.evaluate(name, context);
-        return result.active;
-    }
-
-    async getVariant(name, context = {}) {
-        const result = await this.evaluate(name, context);
-        return result.variant;
-    }
-
     async evaluate(name, context = {}) {
         const feature = this.features.get(name);
         if (!feature) return { active: false, variant: null };
 
+        // 🚨 Kill switch (hard override)
+        if (feature.killSwitch) {
+            return { active: false, variant: null };
+        }
+
         const cacheKey = this.buildCacheKey(name, context);
 
-        if (this.cacheTTL > 0 && this.cache.has(cacheKey)) {
-            const entry = this.cache.get(cacheKey);
-            if (Date.now() - entry.time < this.cacheTTL) {
-                return entry.value;
+        if (this.cacheTTL > 0) {
+            const cached = this.cache.get(cacheKey);
+            if (cached && Date.now() - cached.time < this.cacheTTL) {
+                return cached.value;
             }
         }
 
         let active = feature.enabled;
-        let matchedVariant = null;
+        let variant = null;
 
-        // Evaluate rules by priority (higher first)
-        const sortedRules = [...feature.rules]
+        const rules = [...feature.rules]
             .sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
-        for (const rule of sortedRules) {
-            const matched = await this.evaluateRule(rule, context);
-            if (matched) {
-                active = true;
-                break;
-            }
+        // ⚡ Parallel evaluation (faster)
+        const results = await Promise.all(
+            rules.map(r => this.evaluateRule(r, context))
+        );
+
+        if (results.some(Boolean)) {
+            active = true;
         }
 
-        // Variant selection (A/B testing)
-        if (active && feature.variants?.length) {
-            matchedVariant = this.pickVariant(feature.variants, context);
+        // 🎯 Variant selection (sticky)
+        if (active && feature.variants) {
+            variant = this.pickVariant(feature, context);
         }
 
-        const result = { active, variant: matchedVariant };
+        const result = { active, variant };
 
-        if (this.cacheTTL > 0) {
-            this.cache.set(cacheKey, { value: result, time: Date.now() });
-        }
+        this.cache.set(cacheKey, { value: result, time: Date.now() });
 
         if (active && this.exposureHook) {
             this.safeCall(() =>
-                this.exposureHook({ name, context, variant: matchedVariant })
+                this.exposureHook({ name, context, variant })
             );
         }
+
+        this.log(name, context, result);
 
         return result;
     }
@@ -138,29 +141,37 @@ export class FeatureToggle {
             case "environment":
                 return rule.environments?.includes(this.environment);
 
+            case "segment": // ✅ NEW
+                return this.matchSegment(rule.name, context);
+
             case "custom":
                 if (typeof rule.fn === "function") {
-                    const result = rule.fn(context);
-                    return result instanceof Promise ? await result : !!result;
+                    const res = rule.fn(context);
+                    return res instanceof Promise ? await res : !!res;
                 }
                 return false;
 
-            case "group": // AND/OR logic
-                if (!Array.isArray(rule.rules)) return false;
-                if (rule.operator === "AND") {
-                    for (const r of rule.rules) {
-                        if (!(await this.evaluateRule(r, context))) return false;
-                    }
-                    return true;
-                } else { // OR
-                    for (const r of rule.rules) {
-                        if (await this.evaluateRule(r, context)) return true;
-                    }
-                    return false;
-                }
+            case "group":
+                return this.evaluateGroup(rule, context);
 
             default:
                 return false;
+        }
+    }
+
+    async evaluateGroup(rule, context) {
+        if (!Array.isArray(rule.rules)) return false;
+
+        if (rule.operator === "AND") {
+            for (const r of rule.rules) {
+                if (!(await this.evaluateRule(r, context))) return false;
+            }
+            return true;
+        } else {
+            for (const r of rule.rules) {
+                if (await this.evaluateRule(r, context)) return true;
+            }
+            return false;
         }
     }
 
@@ -172,30 +183,45 @@ export class FeatureToggle {
             ""
         );
 
-        if (!key || typeof rule.percentage !== "number") return false;
+        if (!key) return false;
 
         const bucket = this.stableHash(key) % 100;
         return bucket < rule.percentage;
     }
 
-    pickVariant(variants, context) {
+    pickVariant(feature, context) {
         const key = String(context.rolloutKey || context.userId || "");
-        if (!key) return variants[0]?.name || null;
 
-        const total = variants.reduce((sum, v) => sum + (v.weight || 0), 0);
-        if (total === 0) return null;
+        // ✅ Sticky variant (stable even if weights change)
+        const hash = this.stableHash(feature.name + ":" + key);
 
-        const hash = this.stableHash(key) % total;
+        const total = feature.variants.reduce((s, v) => s + v.weight, 0);
+        const bucket = hash % total;
 
         let cumulative = 0;
-        for (const variant of variants) {
-            cumulative += variant.weight || 0;
-            if (hash < cumulative) {
-                return variant.name;
-            }
+        for (const v of feature.variants) {
+            cumulative += v.weight;
+            if (bucket < cumulative) return v.name;
         }
 
         return null;
+    }
+
+    /* ==================================================
+       CACHE
+    ================================================== */
+
+    invalidateCache(featureName = null) {
+        if (!featureName) {
+            this.cache.clear();
+            return;
+        }
+
+        for (const key of this.cache.keys()) {
+            if (key.startsWith(featureName + ":")) {
+                this.cache.delete(key);
+            }
+        }
     }
 
     /* ==================================================
@@ -203,19 +229,23 @@ export class FeatureToggle {
     ================================================== */
 
     enable(name) {
-        this.ensureMutable();
-        const feature = this.ensureFeature(name);
-        feature.enabled = true;
-        feature.updatedAt = new Date();
-        this.notify(name, true, "enable");
+        const f = this.ensureFeature(name);
+        f.enabled = true;
+        f.updatedAt = new Date();
+        this.invalidateCache(name);
     }
 
     disable(name) {
-        this.ensureMutable();
-        const feature = this.ensureFeature(name);
-        feature.enabled = false;
-        feature.updatedAt = new Date();
-        this.notify(name, false, "disable");
+        const f = this.ensureFeature(name);
+        f.enabled = false;
+        f.updatedAt = new Date();
+        this.invalidateCache(name);
+    }
+
+    setKillSwitch(name, value) {
+        const f = this.ensureFeature(name);
+        f.killSwitch = !!value;
+        this.invalidateCache(name);
     }
 
     freeze() {
@@ -226,18 +256,28 @@ export class FeatureToggle {
         this.frozen = false;
     }
 
-    setExposureHook(fn) {
-        this.exposureHook = typeof fn === "function" ? fn : null;
+    /* ==================================================
+       AUDIT LOGGING (NEW)
+    ================================================== */
+
+    log(name, context, result) {
+        if (!this.enableLogs) return;
+
+        this.auditLog.push({
+            name,
+            context,
+            result,
+            time: Date.now()
+        });
+
+        // prevent memory leak
+        if (this.auditLog.length > 1000) {
+            this.auditLog.shift();
+        }
     }
 
-    snapshot() {
-        return JSON.parse(JSON.stringify([...this.features]));
-    }
-
-    loadSnapshot(snapshot) {
-        this.ensureMutable();
-        this.features = new Map(snapshot);
-        this.notify("*", true, "load");
+    getLogs() {
+        return this.auditLog;
     }
 
     /* ==================================================
@@ -246,38 +286,20 @@ export class FeatureToggle {
 
     ensureFeature(name) {
         const f = this.features.get(name);
-        if (!f) throw new Error(`Feature '${name}' not registered`);
+        if (!f) throw new Error(`Feature '${name}' not found`);
         return f;
     }
 
     ensureMutable() {
         if (this.frozen) {
-            throw new Error("FeatureToggle is frozen.");
+            throw new Error("System is frozen");
         }
     }
 
-    subscribe(listener) {
-        this.listeners.add(listener);
-        return () => this.listeners.delete(listener);
-    }
-
-    notify(name, enabled, reason) {
-        const event = { name, enabled, feature: this.features.get(name), reason };
-        this.listeners.forEach(listener =>
-            this.safeCall(() => listener(event))
-        );
-    }
-
-    safeCall(fn) {
-        try { fn(); } catch (err) {
-            console.error("[FeatureToggle] listener error:", err);
-        }
-    }
-
-    stableHash(value) {
+    stableHash(str) {
         let hash = 0;
-        for (let i = 0; i < value.length; i++) {
-            hash = ((hash << 5) - hash) + value.charCodeAt(i);
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
             hash |= 0;
         }
         return Math.abs(hash);
@@ -285,6 +307,12 @@ export class FeatureToggle {
 
     buildCacheKey(name, context) {
         return name + ":" + JSON.stringify(context);
+    }
+
+    safeCall(fn) {
+        try { fn(); } catch (e) {
+            console.error("[FeatureToggle]", e);
+        }
     }
 }
 
