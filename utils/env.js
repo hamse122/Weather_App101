@@ -183,6 +183,21 @@ function logLoaded(prefix = "[ENV]") {
   console.log(prefix, JSON.stringify(process.env, null, 2));
 }
 
+
+/* --------------------------------------------------------
+ Date 
+-------------------------------------------------------- */
+
+
+getDate(key, defaultValue = null) {
+  const value = this.get(key);
+
+  if (!value) return defaultValue;
+
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? defaultValue : date;
+}
+
 /* --------------------------------------------------------
    Export API
 -------------------------------------------------------- */
@@ -200,6 +215,7 @@ module.exports = {
   getList,
   getJson,
   getUrl,
+  getDate,
 
   // Validators
   requireOneOf,
