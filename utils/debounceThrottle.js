@@ -194,15 +194,55 @@ export function throttleRAF(func) {
 }
 
 /* ---------------------------------------
- * Smart Rate Limit
- * Auto-picks best strategy
+ * Smart Rate Limit (Upgraded)
+ * Auto-selects best strategy intelligently
  * ------------------------------------- */
 export function smartRateLimit(func, wait = 0, opts = {}) {
   if (typeof func !== "function") {
     throw new TypeError("Expected a function");
   }
 
-  if (wait <= 0) return throttleRAF(func);
-  if (opts.throttle) return throttle(func, wait, opts);
-  return debounce(func, wait, opts);
+  const {
+    mode = "auto",        // "auto" | "throttle" | "debounce" | "raf"
+    leading = true,
+    trailing = true,
+    maxWait,
+  } = opts;
+
+  // RAF mode (for animations / scroll / resize)
+  if (mode === "raf" || wait <= 0) {
+    return throttleRAF(func);
+  }
+
+  // Explicit modes
+  if (mode === "throttle") {
+    return throttle(func, wait, { leading, trailing });
+  }
+
+  if (mode === "debounce") {
+    return debounce(func, wait, { leading, trailing, maxWait });
+  }
+
+  // 🔥 AUTO MODE (Smart Detection)
+  // Heuristics based on wait + options
+  if (mode === "auto") {
+    // Very small delay → throttle (UI events like scroll)
+    if (wait <= 50) {
+      return throttle(func, wait, { leading, trailing });
+    }
+
+    // Medium delay → debounce with responsiveness
+    if (wait <= 250) {
+      return debounce(func, wait, { leading: true, trailing: true });
+    }
+
+    // Large delay → strict debounce (API calls, search)
+    return debounce(func, wait, {
+      leading: false,
+      trailing: true,
+      maxWait,
+    });
+  }
+
+  throw new Error(`Invalid mode: ${mode}`);
 }
