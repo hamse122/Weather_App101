@@ -1,6 +1,6 @@
 /**
- * Advanced Deserialization Utility
- * Secure, extensible, Node & Browser compatible
+ * Advanced Deserialization Utility (v2)
+ * Secure, extensible, async-ready
  */
 
 const isNode =
@@ -14,16 +14,21 @@ export class Deserialization {
     // CORE JSON
     // ==========================
 
-    static fromJSON(json, reviver) {
+    static fromJSON(json, { reviver, freeze = false } = {}) {
         if (typeof json !== "string") {
             throw new TypeError("JSON input must be a string");
         }
 
         try {
-            return JSON.parse(json, reviver);
+            const parsed = JSON.parse(json, reviver);
+            return freeze ? this.deepFreeze(parsed) : parsed;
         } catch (err) {
             throw new Error(`JSON deserialization failed: ${err.message}`);
         }
+    }
+
+    static async fromJSONAsync(json, options) {
+        return this.fromJSON(json, options);
     }
 
     static safe(json, fallback = null) {
@@ -45,23 +50,44 @@ export class Deserialization {
     }
 
     // ==========================
-    // TYPE COERCION
+    // TYPE COERCION (DEEP)
     // ==========================
 
     static coerce(value) {
-        if (value === "true") return true;
-        if (value === "false") return false;
-        if (value === "null") return null;
-        if (value === "undefined") return undefined;
-        if (!isNaN(value) && value.trim() !== "") return Number(value);
+        if (typeof value !== "string") return value;
+
+        const v = value.trim();
+
+        if (v === "true") return true;
+        if (v === "false") return false;
+        if (v === "null") return null;
+        if (v === "undefined") return undefined;
+        if (!isNaN(v) && v !== "") return Number(v);
+
         return value;
+    }
+
+    static deepCoerce(obj) {
+        if (Array.isArray(obj)) {
+            return obj.map(v => this.deepCoerce(v));
+        }
+
+        if (obj && typeof obj === "object") {
+            const result = Object.create(null);
+            for (const key in obj) {
+                result[key] = this.deepCoerce(obj[key]);
+            }
+            return result;
+        }
+
+        return this.coerce(obj);
     }
 
     // ==========================
     // QUERY STRING
     // ==========================
 
-    static fromQueryString(query) {
+    static fromQueryString(query, { deep = false } = {}) {
         const params = new URLSearchParams(query);
         const result = Object.create(null);
 
@@ -77,7 +103,7 @@ export class Deserialization {
             }
         }
 
-        return result;
+        return deep ? this.deepCoerce(result) : result;
     }
 
     // ==========================
@@ -103,15 +129,19 @@ export class Deserialization {
     }
 
     // ==========================
-    // BASE64 JSON
+    // BASE64 JSON (URL SAFE)
     // ==========================
 
     static fromBase64(base64) {
         try {
+            const normalized = base64
+                .replace(/-/g, "+")
+                .replace(/_/g, "/");
+
             const decoded = isNode
-                ? Buffer.from(base64, "base64").toString("utf-8")
+                ? Buffer.from(normalized, "base64").toString("utf-8")
                 : new TextDecoder().decode(
-                      Uint8Array.from(atob(base64), c => c.charCodeAt(0))
+                      Uint8Array.from(atob(normalized), c => c.charCodeAt(0))
                   );
 
             return JSON.parse(decoded);
@@ -121,29 +151,29 @@ export class Deserialization {
     }
 
     // ==========================
-    // TYPE METADATA
+    // TYPE METADATA (EXTENSIBLE)
     // ==========================
+
+    static transformers = {
+        Date: v => new Date(v.value),
+        RegExp: v => new RegExp(v.pattern, v.flags),
+        Map: v => new Map(v.value),
+        Set: v => new Set(v.value),
+    };
+
+    static registerType(type, handler) {
+        this.transformers[type] = handler;
+    }
 
     static withTypeMetadata(json) {
         return JSON.parse(json, (_, value) => {
             if (!value || typeof value !== "object") return value;
 
-            switch (value.__type) {
-                case "Date":
-                    return new Date(value.value);
-
-                case "RegExp":
-                    return new RegExp(value.pattern, value.flags);
-
-                case "Map":
-                    return new Map(value.value);
-
-                case "Set":
-                    return new Set(value.value);
-
-                default:
-                    return value;
+            if (value.__type && this.transformers[value.__type]) {
+                return this.transformers[value.__type](value);
             }
+
+            return value;
         });
     }
 
@@ -155,14 +185,14 @@ export class Deserialization {
         try {
             const url = base ? new URL(input, base) : new URL(input);
 
-            return {
+            return Object.freeze({
                 protocol: url.protocol,
                 origin: url.origin,
                 host: url.host,
                 pathname: url.pathname,
                 query: this.fromQueryString(url.search.slice(1)),
                 hash: url.hash.slice(1)
-            };
+            });
         } catch (err) {
             throw new Error(`URL deserialization failed: ${err.message}`);
         }
@@ -180,20 +210,57 @@ export class Deserialization {
         try {
             const yaml = require("js-yaml");
             return yaml.load(text);
-        } catch {
-            throw new Error("YAML deserialization failed. Install 'js-yaml'.");
+        } catch (err) {
+            throw new Error(`YAML deserialization failed: ${err.message}`);
         }
     }
 
     // ==========================
-    // SCHEMA VALIDATION (OPTIONAL)
+    // SCHEMA VALIDATION (SYNC + ASYNC)
     // ==========================
 
-    static withSchema(json, validator) {
+    static async withSchema(json, validator) {
         const data = this.fromJSON(json);
-        if (!validator(data)) {
+
+        const valid = validator.constructor.name === "AsyncFunction"
+            ? await validator(data)
+            : validator(data);
+
+        if (!valid) {
             throw new Error("Schema validation failed");
         }
+
         return data;
+    }
+
+    // ==========================
+    // SECURITY
+    // ==========================
+
+    static sanitize(obj) {
+        if (!obj || typeof obj !== "object") return obj;
+
+        const clean = Object.create(null);
+
+        for (const key in obj) {
+            if (key === "__proto__" || key === "constructor") continue;
+            clean[key] = this.sanitize(obj[key]);
+        }
+
+        return clean;
+    }
+
+    // ==========================
+    // UTIL
+    // ==========================
+
+    static deepFreeze(obj) {
+        if (obj && typeof obj === "object") {
+            Object.freeze(obj);
+            for (const key in obj) {
+                this.deepFreeze(obj[key]);
+            }
+        }
+        return obj;
     }
 }
