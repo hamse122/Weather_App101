@@ -1,9 +1,3 @@
-/**
- * Advanced JSON Validator Utility
- * Supports schema validation, strict mode, enums, custom validators,
- * deep clone with circular reference protection, and safe deep merge.
- */
-
 export class JSONValidator {
 
     // ===============================
@@ -14,7 +8,7 @@ export class JSONValidator {
             const data = JSON.parse(jsonString);
             return { isValid: true, error: null, data };
         } catch (err) {
-            return { isValid: false, error: err.message };
+            return { isValid: false, error: err.message, data: null };
         }
     }
 
@@ -23,9 +17,21 @@ export class JSONValidator {
     // ===============================
     static validateSchema(json, schema, options = {}, path = "") {
         const errors = [];
-        const { strict = false } = options;
+        const {
+            strict = false,
+            applyDefaults = false,
+            deepStrict = false
+        } = options;
 
-        // Strict mode → detect unknown fields
+        // Prevent prototype pollution
+        if (json && typeof json === "object") {
+            if ("__proto__" in json || "constructor" in json) {
+                errors.push(`Unsafe key detected at '${path || "root"}'`);
+                return { isValid: false, errors };
+            }
+        }
+
+        // Strict mode (top-level)
         if (strict && typeof json === "object" && json !== null) {
             for (const key of Object.keys(json)) {
                 if (!schema[key]) {
@@ -35,20 +41,35 @@ export class JSONValidator {
         }
 
         for (const [key, rules] of Object.entries(schema)) {
-            const value = json?.[key];
+            let value = json?.[key];
             const fieldPath = path ? `${path}.${key}` : key;
 
-            // Required check
+            // Apply default
+            if (value === undefined && applyDefaults && "default" in rules) {
+                value = rules.default;
+                json[key] = value;
+            }
+
+            // Required
             if (rules.required && (value === undefined || value === null)) {
                 errors.push(`Field '${fieldPath}' is required`);
                 continue;
             }
 
+            // Nullable
+            if (rules.nullable && value === null) continue;
+
             if (value === undefined || value === null) continue;
+
+            // Transform (e.g. trim)
+            if (typeof rules.transform === "function") {
+                value = rules.transform(value);
+                json[key] = value;
+            }
 
             const actualType = this.getType(value);
 
-            // Type validation
+            // Type check
             if (rules.type && actualType !== rules.type) {
                 errors.push(
                     `Field '${fieldPath}' must be '${rules.type}', got '${actualType}'`
@@ -56,14 +77,14 @@ export class JSONValidator {
                 continue;
             }
 
-            // Enum validation
+            // Enum
             if (rules.enum && !rules.enum.includes(value)) {
                 errors.push(
                     `Field '${fieldPath}' must be one of [${rules.enum.join(", ")}]`
                 );
             }
 
-            // String rules
+            // STRING
             if (rules.type === "string") {
                 if (rules.minLength && value.length < rules.minLength) {
                     errors.push(`Field '${fieldPath}' min length is ${rules.minLength}`);
@@ -76,7 +97,7 @@ export class JSONValidator {
                 }
             }
 
-            // Number rules
+            // NUMBER
             if (rules.type === "number") {
                 if (Number.isNaN(value)) {
                     errors.push(`Field '${fieldPath}' must be a valid number`);
@@ -89,18 +110,32 @@ export class JSONValidator {
                 }
             }
 
-            // Object rules
+            // BOOLEAN
+            if (rules.type === "boolean") {
+                if (typeof value !== "boolean") {
+                    errors.push(`Field '${fieldPath}' must be boolean`);
+                }
+            }
+
+            // DATE
+            if (rules.type === "date") {
+                if (!(value instanceof Date) || isNaN(value)) {
+                    errors.push(`Field '${fieldPath}' must be a valid date`);
+                }
+            }
+
+            // OBJECT
             if (rules.type === "object" && rules.schema) {
                 const nested = this.validateSchema(
                     value,
                     rules.schema,
-                    options,
+                    { ...options, strict: deepStrict },
                     fieldPath
                 );
                 errors.push(...nested.errors);
             }
 
-            // Array rules
+            // ARRAY
             if (rules.type === "array") {
                 if (!Array.isArray(value)) {
                     errors.push(`Field '${fieldPath}' must be an array`);
@@ -114,22 +149,23 @@ export class JSONValidator {
                     errors.push(`Field '${fieldPath}' allows at most ${rules.maxItems} items`);
                 }
 
-                // Nested array schema
                 if (rules.items) {
                     value.forEach((item, i) => {
+                        const itemPath = `${fieldPath}[${i}]`;
+
                         if (rules.items.schema) {
                             const nested = this.validateSchema(
                                 item,
                                 rules.items.schema,
                                 options,
-                                `${fieldPath}[${i}]`
+                                itemPath
                             );
                             errors.push(...nested.errors);
                         } else if (rules.items.type) {
                             const itemType = this.getType(item);
                             if (itemType !== rules.items.type) {
                                 errors.push(
-                                    `Field '${fieldPath}[${i}]' must be '${rules.items.type}'`
+                                    `Field '${itemPath}' must be '${rules.items.type}'`
                                 );
                             }
                         }
@@ -185,10 +221,11 @@ export class JSONValidator {
             return new Date(value.getTime());
         }
 
-        const obj = {};
+        const obj = Object.create(null); // safer object
         seen.set(value, obj);
 
         for (const key in value) {
+            if (key === "__proto__" || key === "constructor") continue;
             obj[key] = this.deepClone(value[key], seen);
         }
 
@@ -202,6 +239,8 @@ export class JSONValidator {
         const output = this.deepClone(target);
 
         for (const key in source) {
+            if (key === "__proto__" || key === "constructor") continue;
+
             const srcVal = source[key];
             const tgtVal = output[key];
 
