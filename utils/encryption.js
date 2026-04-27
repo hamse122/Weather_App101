@@ -1,32 +1,33 @@
-/**
- * Advanced Encryption Utility
- * PBKDF2 + AES-256-GCM (Web Crypto API)
- * Versioned, authenticated, hardened
- */
-
 export class Encryption {
 
-    // ===== Constants =====
-    static VERSION = 1;
+    static VERSION = 2;
     static SALT_LENGTH = 16;
     static IV_LENGTH = 12;
-    static DEFAULT_ITERATIONS = 150_000;
+    static TAG_LENGTH = 16;
+    static DEFAULT_ITERATIONS = 210_000;
 
-    // ===== Encoding Helpers =====
     static encoder = new TextEncoder();
     static decoder = new TextDecoder();
 
+    // ===== Encoding =====
     static encode(data) {
-        return this.encoder.encode(data);
+        return this.encoder.encode(data.normalize("NFKC")); // normalize passwords
     }
 
     static decode(data) {
         return this.decoder.decode(data);
     }
 
-    // Base64URL (RFC 4648 §5)
+    // ===== Safe Base64URL =====
     static toBase64Url(bytes) {
-        return btoa(String.fromCharCode(...bytes))
+        let binary = "";
+        const chunkSize = 0x8000;
+
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+
+        return btoa(binary)
             .replace(/\+/g, "-")
             .replace(/\//g, "_")
             .replace(/=+$/, "");
@@ -35,15 +36,19 @@ export class Encryption {
     static fromBase64Url(str) {
         str = str.replace(/-/g, "+").replace(/_/g, "/");
         while (str.length % 4) str += "=";
-        return Uint8Array.from(atob(str), c => c.charCodeAt(0));
+
+        const binary = atob(str);
+        const bytes = new Uint8Array(binary.length);
+
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+
+        return bytes;
     }
 
     // ===== Key Derivation =====
     static async deriveKey(password, salt, iterations) {
-        if (!password || !salt) {
-            throw new Error("Password and salt required");
-        }
-
         const baseKey = await crypto.subtle.importKey(
             "raw",
             this.encode(password),
@@ -66,88 +71,115 @@ export class Encryption {
         );
     }
 
+    // ===== Optional Compression =====
+    static compress(text) {
+        return new TextEncoder().encode(text); // placeholder (can plug gzip later)
+    }
+
+    static decompress(bytes) {
+        return new TextDecoder().decode(bytes);
+    }
+
     // ===== Encryption =====
-    static async encrypt(plaintext, password, iterations = this.DEFAULT_ITERATIONS) {
+    static async encrypt(plaintext, password, options = {}) {
+        const {
+            iterations = this.DEFAULT_ITERATIONS,
+            compress = false
+        } = options;
+
         const salt = crypto.getRandomValues(new Uint8Array(this.SALT_LENGTH));
         const iv = crypto.getRandomValues(new Uint8Array(this.IV_LENGTH));
 
         const key = await this.deriveKey(password, salt, iterations);
 
-        const aad = new Uint8Array([this.VERSION]); // authenticated metadata
+        let data = compress ? this.compress(plaintext) : this.encode(plaintext);
 
-        const ciphertext = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv, additionalData: aad },
+        const aad = new Uint8Array([this.VERSION, compress ? 1 : 0]);
+
+        const encrypted = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv, additionalData: aad, tagLength: 128 },
             key,
-            this.encode(plaintext)
+            data
         );
 
-        // Payload format:
-        // [version|iterations(4)|salt|iv|ciphertext]
+        const encryptedBytes = new Uint8Array(encrypted);
+
+        // Split ciphertext + tag (future-proof)
+        const ciphertext = encryptedBytes.slice(0, -this.TAG_LENGTH);
+        const tag = encryptedBytes.slice(-this.TAG_LENGTH);
+
         const buffer = new Uint8Array(
-            1 + 4 + salt.length + iv.length + ciphertext.byteLength
+            1 + 1 + 4 + salt.length + iv.length + tag.length + ciphertext.length
         );
 
         let offset = 0;
         buffer[offset++] = this.VERSION;
+        buffer[offset++] = compress ? 1 : 0;
 
         new DataView(buffer.buffer).setUint32(offset, iterations);
         offset += 4;
 
         buffer.set(salt, offset); offset += salt.length;
         buffer.set(iv, offset); offset += iv.length;
-        buffer.set(new Uint8Array(ciphertext), offset);
+        buffer.set(tag, offset); offset += tag.length;
+        buffer.set(ciphertext, offset);
 
         return this.toBase64Url(buffer);
     }
 
     // ===== Decryption =====
     static async decrypt(payload, password) {
-        try {
-            const data = this.fromBase64Url(payload);
-            let offset = 0;
+        const data = this.fromBase64Url(payload);
 
-            const version = data[offset++];
-            if (version !== this.VERSION) {
-                throw new Error("Unsupported encryption version");
-            }
+        let offset = 0;
 
-            const iterations = new DataView(data.buffer).getUint32(offset);
-            offset += 4;
+        const version = data[offset++];
+        const compressed = data[offset++] === 1;
 
-            const salt = data.slice(offset, offset + this.SALT_LENGTH);
-            offset += this.SALT_LENGTH;
-
-            const iv = data.slice(offset, offset + this.IV_LENGTH);
-            offset += this.IV_LENGTH;
-
-            const ciphertext = data.slice(offset);
-
-            const key = await this.deriveKey(password, salt, iterations);
-
-            const plaintext = await crypto.subtle.decrypt(
-                {
-                    name: "AES-GCM",
-                    iv,
-                    additionalData: new Uint8Array([version])
-                },
-                key,
-                ciphertext
-            );
-
-            return this.decode(plaintext);
-
-        } catch {
-            throw new Error("Decryption failed (bad password or corrupted data)");
+        if (version > this.VERSION) {
+            throw new Error("Unsupported future encryption version");
         }
+
+        const iterations = new DataView(data.buffer).getUint32(offset);
+        offset += 4;
+
+        const salt = data.slice(offset, offset + this.SALT_LENGTH);
+        offset += this.SALT_LENGTH;
+
+        const iv = data.slice(offset, offset + this.IV_LENGTH);
+        offset += this.IV_LENGTH;
+
+        const tag = data.slice(offset, offset + this.TAG_LENGTH);
+        offset += this.TAG_LENGTH;
+
+        const ciphertext = data.slice(offset);
+
+        const key = await this.deriveKey(password, salt, iterations);
+
+        const combined = new Uint8Array(ciphertext.length + tag.length);
+        combined.set(ciphertext);
+        combined.set(tag, ciphertext.length);
+
+        const plaintext = await crypto.subtle.decrypt(
+            {
+                name: "AES-GCM",
+                iv,
+                additionalData: new Uint8Array([version, compressed ? 1 : 0]),
+                tagLength: 128
+            },
+            key,
+            combined
+        );
+
+        return compressed
+            ? this.decompress(new Uint8Array(plaintext))
+            : this.decode(plaintext);
     }
 
-    // ===== Hashing =====
+    // ===== SHA-256 =====
     static async sha256(data) {
-        const hash = await crypto.subtle.digest(
-            "SHA-256",
-            this.encode(data)
-        );
-        return [...new Uint8Array(hash)]
+        const hash = await crypto.subtle.digest("SHA-256", this.encode(data));
+        return Array.from(new Uint8Array(hash))
             .map(b => b.toString(16).padStart(2, "0"))
             .join("");
     }
@@ -166,7 +198,6 @@ export class Encryption {
         return this.toBase64Url(new Uint8Array(sig));
     }
 
-    // ===== Constant-Time Compare (Bytes) =====
     static timingSafeEqual(a, b) {
         if (a.length !== b.length) return false;
         let diff = 0;
