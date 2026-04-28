@@ -312,36 +312,76 @@ export class PerformanceMonitor {
         }
     }
     
-    /**
-     * Monitor resource loading
-     */
-    monitorResources() {
-        if (typeof PerformanceObserver === 'undefined') {
-            return;
-        }
-        
-        const observer = new PerformanceObserver((list) => {
-            list.getEntries().forEach((entry) => {
-                const name = entry.name;
-                if (!this.metrics.has(name)) {
-                    this.metrics.set(name, []);
-                }
-                
-                this.metrics.get(name).push({
-                    duration: entry.duration,
-                    timestamp: entry.startTime,
-                    type: entry.entryType
-                });
-            });
+/**
+ * 🚀 Advanced Resource Monitoring (Optimized)
+ */
+monitorResources(options = {}) {
+    if (typeof PerformanceObserver === "undefined") return;
+
+    const {
+        maxEntries = 200,          // prevent memory leaks
+        slowThreshold = 1000,     // ms
+        groupByType = true        // group resources by type
+    } = options;
+
+    const observer = new PerformanceObserver((list) => {
+        list.getEntries().forEach((entry) => {
+            const type = entry.initiatorType || "other";
+            const key = groupByType ? type : this._normalizeName(entry.name);
+
+            if (!this.metrics.has(key)) {
+                this.metrics.set(key, []);
+            }
+
+            const resourceData = {
+                name: this._shortName(entry.name),
+                duration: entry.duration,
+                size: entry.transferSize || 0,
+                start: entry.startTime,
+                slow: entry.duration > slowThreshold
+            };
+
+            const bucket = this.metrics.get(key);
+
+            // limit memory usage
+            if (bucket.length >= maxEntries) {
+                bucket.shift();
+            }
+
+            bucket.push(resourceData);
         });
-        
-        try {
-            observer.observe({ entryTypes: ['resource', 'navigation', 'paint'] });
-            this.observers.push(observer);
-        } catch (error) {
-            console.warn('PerformanceObserver not fully supported:', error);
-        }
+    });
+
+    try {
+        observer.observe({ entryTypes: ["resource"] });
+        this.observers.push(observer);
+    } catch (err) {
+        console.warn("Resource monitoring not supported:", err);
     }
+}
+
+/* ================================
+ * HELPERS (VERY IMPORTANT)
+ * ================================ */
+
+// Remove query strings & hashes (clean grouping)
+_normalizeName(url) {
+    try {
+        const u = new URL(url);
+        return u.pathname;
+    } catch {
+        return url;
+    }
+}
+
+// Keep only filename (better readability)
+_shortName(url) {
+    try {
+        return url.split("/").pop().split("?")[0];
+    } catch {
+        return url;
+    }
+}
     
     /**
      * Get Web Vitals metrics
