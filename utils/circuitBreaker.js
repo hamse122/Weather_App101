@@ -1,8 +1,3 @@
-/**
- * Circuit Breaker Utility
- * Protects async functions from cascading failures
- */
-
 export class CircuitBreaker {
     constructor(fn, options = {}) {
         if (typeof fn !== "function") {
@@ -11,88 +6,119 @@ export class CircuitBreaker {
 
         this.fn = fn;
 
-        // Configurable settings
-        this.threshold = options.threshold ?? 5;        // failures before OPEN
-        this.timeout = options.timeout ?? 60000;        // execution timeout
-        this.resetTimeout = options.resetTimeout ?? 30000; // cooldown period
-        this.fallback = options.fallback ?? null;       // optional fallback
+        // Config
+        this.threshold = options.threshold ?? 5;
+        this.timeout = options.timeout ?? 10000;
+        this.resetTimeout = options.resetTimeout ?? 30000;
+        this.fallback = options.fallback ?? null;
 
-        // internal state
+        // Advanced options
+        this.errorFilter = options.errorFilter ?? (() => true);
+        this.onOpen = options.onOpen ?? (() => {});
+        this.onClose = options.onClose ?? (() => {});
+        this.onHalfOpen = options.onHalfOpen ?? (() => {});
+        this.halfOpenMaxCalls = options.halfOpenMaxCalls ?? 1;
+
+        // State
+        this.state = "CLOSED";
         this.failureCount = 0;
         this.successCount = 0;
-        this.state = "CLOSED";
         this.nextAttempt = Date.now();
+
+        // Concurrency control
+        this.halfOpenActiveCalls = 0;
     }
 
-    /**
-     * Execute function with circuit breaker protection
-     */
     async execute(...args) {
         if (this.state === "OPEN") {
             if (Date.now() < this.nextAttempt) {
-                if (this.fallback) return this.fallback(...args);
-                throw new Error("CircuitBreaker: OPEN (cooldown active)");
+                return this._handleFallback(
+                    new Error("CircuitBreaker: OPEN (cooldown active)"),
+                    args
+                );
             }
-            // Trial execution
+
             this.state = "HALF_OPEN";
             this.successCount = 0;
+            this.halfOpenActiveCalls = 0;
+            this.onHalfOpen();
         }
 
-        try {
-            const result = await Promise.race([
-                this.fn(...args),
-                this._timeoutReject(this.timeout)
-            ]);
+        if (this.state === "HALF_OPEN") {
+            if (this.halfOpenActiveCalls >= this.halfOpenMaxCalls) {
+                return this._handleFallback(
+                    new Error("CircuitBreaker: HALF_OPEN limit reached"),
+                    args
+                );
+            }
+            this.halfOpenActiveCalls++;
+        }
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+        try {
+            const result = await this.fn(...args, { signal: controller.signal });
+
+            clearTimeout(timeoutId);
             this._handleSuccess();
             return result;
 
         } catch (error) {
+            clearTimeout(timeoutId);
+
+            // Ignore non-critical errors
+            if (!this.errorFilter(error)) {
+                throw error;
+            }
+
             this._handleFailure(error);
-            if (this.fallback) return this.fallback(...args);
-            throw error;
+            return this._handleFallback(error, args);
         }
     }
 
-    /**
-     * Reject after the given timeout
-     */
-    _timeoutReject(ms) {
-        return new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("CircuitBreaker: TIMEOUT")), ms)
-        );
-    }
-
-    /**
-     * Success handler
-     */
     _handleSuccess() {
         this.failureCount = 0;
 
         if (this.state === "HALF_OPEN") {
             this.successCount++;
+
             if (this.successCount >= this.threshold) {
-                this.state = "CLOSED";
-                this.successCount = 0;
+                this._close();
             }
         }
     }
 
-    /**
-     * Failure handler
-     */
     _handleFailure(error) {
         this.failureCount++;
 
-        if (this.failureCount >= this.threshold) {
-            this.state = "OPEN";
-            this.nextAttempt = Date.now() + this.resetTimeout;
+        if (this.state === "HALF_OPEN" || this.failureCount >= this.threshold) {
+            this._open();
         }
     }
 
-    /**
-     * Get current state
-     */
+    _handleFallback(error, args) {
+        if (this.fallback) {
+            return this.fallback(error, ...args);
+        }
+        throw error;
+    }
+
+    _open() {
+        if (this.state !== "OPEN") {
+            this.state = "OPEN";
+            this.nextAttempt = Date.now() + this.resetTimeout;
+            this.onOpen();
+        }
+    }
+
+    _close() {
+        this.state = "CLOSED";
+        this.failureCount = 0;
+        this.successCount = 0;
+        this.onClose();
+    }
+
     getState() {
         return {
             state: this.state,
@@ -102,35 +128,19 @@ export class CircuitBreaker {
         };
     }
 
-    /**
-     * Reset to safe state
-     */
     reset() {
-        this.state = "CLOSED";
-        this.failureCount = 0;
-        this.successCount = 0;
-        this.nextAttempt = Date.now();
+        this._close();
     }
 
-    /**
-     * Force OPEN (manual override)
-     */
     forceOpen() {
-        this.state = "OPEN";
-        this.nextAttempt = Date.now() + this.resetTimeout;
+        this._open();
     }
 
-    /**
-     * Force CLOSED (manual override)
-     */
     forceClose() {
-        this.reset();
+        this._close();
     }
 }
 
-/**
- * Factory function
- */
 export function createCircuitBreaker(fn, options = {}) {
     return new CircuitBreaker(fn, options);
 }
