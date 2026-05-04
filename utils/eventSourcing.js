@@ -5,10 +5,10 @@ class EventStore {
         snapshotInterval = 50,
         clock = () => new Date()
     } = {}) {
-        this.streams = new Map();            // aggregateId -> events[]
-        this.projections = new Map();        // name -> projection
-        this.snapshots = new Map();           // aggregateId -> snapshot
-        this.subscribers = new Set();         // async handlers
+        this.streams = new Map();           
+        this.projections = new Map();        
+        this.snapshots = new Map();          
+        this.subscribers = new Set();        
         this.globalVersion = 0;
         this.snapshotInterval = snapshotInterval;
         this.clock = clock;
