@@ -3,6 +3,7 @@
  * Production-ready, resilient, extensible
  */
 
+
 class Analytics {
     constructor(options = {}) {
         this.endpoint = options.endpoint || "/analytics";
