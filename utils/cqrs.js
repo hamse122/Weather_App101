@@ -9,6 +9,7 @@ class CQRS {
             query: [],
             event: []
         };
+        
 
         this.hooks = {
             beforeCommand: [],
