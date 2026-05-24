@@ -80,7 +80,7 @@ export class EnhancedErrorHandler {
 
         return this._executeWithResilience(entry, error, context);
     }
-
+    
     /* =========================
        Resilience
     ========================== */
