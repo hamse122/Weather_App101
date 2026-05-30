@@ -1,12 +1,3 @@
-/**
- * Advanced REST Client
- * - Interceptors (request/response/error)
- * - Retries with exponential backoff
- * - Timeouts (global + per request)
- * - Auto JSON handling
- * - AbortController support
- */
-
 class RestClient {
     constructor(baseURL = '', options = {}) {
         this.baseURL = baseURL.replace(/\/+$/, '');
@@ -23,18 +14,20 @@ class RestClient {
             attempts: options.retryAttempts ?? 0,
             baseDelay: options.retryDelay ?? 300,
             maxDelay: options.maxRetryDelay ?? 3000,
-            retryOn: options.retryOn ?? [408, 429, 500, 502, 503, 504]
+            retryOn: options.retryOn ?? [408, 429, 500, 502, 503, 504],
+            retryFn: options.retryFn
         };
 
         this.requestInterceptors = [];
         this.responseInterceptors = [];
         this.errorInterceptors = [];
 
-        this.transformRequest = options.transformRequest ?? (cfg => cfg);
-        this.transformResponse = options.transformResponse ?? (res => res);
-    }
+        this.transformRequest =
+            options.transformRequest ?? (cfg => cfg);
 
-    /* ================= INTERCEPTORS ================= */
+        this.transformResponse =
+            options.transformResponse ?? (res => res);
+    }
 
     useRequest(fn) {
         this.requestInterceptors.push(fn);
@@ -51,13 +44,20 @@ class RestClient {
         return this;
     }
 
-    /* ================= CORE REQUEST ================= */
-
     async request(endpoint, config = {}) {
-        const controller = new AbortController();
         const timeout = config.timeout ?? this.timeout;
 
-        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        const timeoutController = new AbortController();
+
+        const timeoutId = setTimeout(
+            () => timeoutController.abort(),
+            timeout
+        );
+
+        const signal = this.mergeSignals(
+            config.signal,
+            timeoutController.signal
+        );
 
         let requestConfig = {
             method: config.method || 'GET',
@@ -66,42 +66,70 @@ class RestClient {
                 ...config.headers
             }),
             body: config.body,
-            signal: config.signal || controller.signal
+            signal
         };
 
         requestConfig = this.transformRequest(requestConfig);
 
+        const url = this.buildURL(endpoint, config.params);
+
         for (const interceptor of this.requestInterceptors) {
-            requestConfig = (await interceptor(requestConfig)) || requestConfig;
+            requestConfig =
+                (await interceptor(requestConfig, url)) ||
+                requestConfig;
         }
 
-        const url = this.buildURL(endpoint);
-
         const execute = async (attempt = 0) => {
+            const start = performance.now();
+
             try {
-                let response = await this.fetchImpl(url, requestConfig);
+                let response = await this.fetchImpl(
+                    url,
+                    requestConfig
+                );
+
+                response.duration =
+                    performance.now() - start;
 
                 for (const interceptor of this.responseInterceptors) {
-                    response = (await interceptor(response)) || response;
+                    response =
+                        (await interceptor(response.clone())) ||
+                        response;
                 }
 
                 if (!response.ok) {
-                    const error = await this.createHttpError(response);
-                    if (this.shouldRetry(response.status, attempt)) {
+                    const error =
+                        await this.createHttpError(response);
+
+                    if (
+                        this.shouldRetry(
+                            response.status,
+                            attempt,
+                            error
+                        )
+                    ) {
                         await this.backoff(attempt);
                         return execute(attempt + 1);
                     }
+
                     throw error;
                 }
 
-                return this.transformResponse(await this.parseResponse(response));
-
+                return this.transformResponse(
+                    await this.parseResponse(response)
+                );
             } catch (err) {
                 for (const interceptor of this.errorInterceptors) {
-                    err = (await interceptor(err)) || err;
+                    err =
+                        (await interceptor(err)) || err;
                 }
 
-                if (this.shouldRetry(err, attempt)) {
+                if (
+                    this.shouldRetry(
+                        err,
+                        attempt
+                    )
+                ) {
                     await this.backoff(attempt);
                     return execute(attempt + 1);
                 }
@@ -117,64 +145,166 @@ class RestClient {
         }
     }
 
-    /* ================= HELPERS ================= */
+    buildURL(endpoint, params) {
+        const url = /^https?:\/\//i.test(endpoint)
+            ? new URL(endpoint)
+            : new URL(
+                  `${this.baseURL}/${endpoint.replace(/^\/+/, '')}`
+              );
 
-    buildURL(endpoint) {
-        if (/^https?:\/\//i.test(endpoint)) return endpoint;
-        return `${this.baseURL}/${endpoint.replace(/^\/+/, '')}`;
+        if (params) {
+            Object.entries(params).forEach(([k, v]) => {
+                if (v !== undefined && v !== null) {
+                    url.searchParams.append(k, v);
+                }
+            });
+        }
+
+        return url.toString();
     }
 
     normalizeHeaders(headers = {}) {
         const normalized = {};
+
         for (const key in headers) {
             normalized[key.toLowerCase()] = headers[key];
         }
+
         return normalized;
     }
 
-    shouldRetry(reason, attempt) {
-        if (attempt >= this.retry.attempts) return false;
-        if (typeof reason === 'number') return this.retry.retryOn.includes(reason);
-        if (reason?.name === 'AbortError') return true;
+    mergeSignals(...signals) {
+        const controller = new AbortController();
+
+        const abort = () => controller.abort();
+
+        for (const signal of signals) {
+            if (!signal) continue;
+
+            if (signal.aborted) {
+                controller.abort();
+                break;
+            }
+
+            signal.addEventListener(
+                'abort',
+                abort,
+                { once: true }
+            );
+        }
+
+        return controller.signal;
+    }
+
+    shouldRetry(reason, attempt, error) {
+        if (attempt >= this.retry.attempts)
+            return false;
+
+        if (typeof this.retry.retryFn === 'function') {
+            return this.retry.retryFn(
+                reason,
+                attempt,
+                error
+            );
+        }
+
+        if (typeof reason === 'number') {
+            return this.retry.retryOn.includes(reason);
+        }
+
+        if (reason?.name === 'AbortError') {
+            return true;
+        }
+
+        if (reason instanceof TypeError) {
+            return true;
+        }
+
         return false;
     }
 
     async backoff(attempt) {
-        const exp = Math.min(
+        const delay = Math.min(
             this.retry.baseDelay * 2 ** attempt,
             this.retry.maxDelay
         );
-        const jitter = Math.random() * 100;
-        await new Promise(r => setTimeout(r, exp + jitter));
+
+        const jitter = Math.random() * delay * 0.25;
+
+        await new Promise(resolve =>
+            setTimeout(resolve, delay + jitter)
+        );
     }
 
     async parseResponse(response) {
-        const contentType = response.headers.get('content-type') || '';
+        const contentType =
+            response.headers.get('content-type') || '';
+
         if (contentType.includes('application/json')) {
             return response.json();
         }
+
+        if (
+            contentType.includes('application/octet-stream')
+        ) {
+            return response.arrayBuffer();
+        }
+
         return response.text();
     }
 
     async createHttpError(response) {
         let data;
+
         try {
             data = await this.parseResponse(response);
         } catch {
             data = null;
         }
 
-        const error = new Error(`HTTP ${response.status}`);
+        const error = new Error(
+            `HTTP ${response.status} ${response.statusText}`
+        );
+
         error.status = response.status;
+        error.statusText = response.statusText;
         error.data = data;
-        error.headers = Object.fromEntries(response.headers.entries());
+        error.headers = Object.fromEntries(
+            response.headers.entries()
+        );
+
         return error;
     }
 
-    /* ================= HTTP METHODS ================= */
+    prepareBody(body, config = {}) {
+        if (body == null) return undefined;
+
+        const headers = this.normalizeHeaders(
+            config.headers || {}
+        );
+
+        if (
+            typeof body === 'object' &&
+            !(body instanceof FormData) &&
+            !(body instanceof Blob)
+        ) {
+            if (!headers['content-type']) {
+                headers['content-type'] =
+                    'application/json';
+                config.headers = headers;
+            }
+
+            return JSON.stringify(body);
+        }
+
+        return body;
+    }
 
     get(url, config) {
-        return this.request(url, { ...config, method: 'GET' });
+        return this.request(url, {
+            ...config,
+            method: 'GET'
+        });
     }
 
     post(url, body, config = {}) {
@@ -202,16 +332,10 @@ class RestClient {
     }
 
     delete(url, config) {
-        return this.request(url, { ...config, method: 'DELETE' });
-    }
-
-    prepareBody(body, config) {
-        if (body == null) return undefined;
-        const headers = this.normalizeHeaders(config.headers || {});
-        if (headers['content-type']?.includes('application/json')) {
-            return JSON.stringify(body);
-        }
-        return body;
+        return this.request(url, {
+            ...config,
+            method: 'DELETE'
+        });
     }
 }
 
