@@ -89,19 +89,26 @@ export class ConfigurationManager {
 
     /**
      * Set a configuration value
-     * @param {keyof T & string} key - Configuration key
-     * @param {T[keyof T]} value - Configuration value
-     * @param {{silent?: boolean}} [options]
+
      */
-    set(key, value, options = {}) {
-        this.validate(key, value);
-        const previous = this.config[key];
-        this.config[key] = value;
-        if (!options.silent) {
-            this.notifyListeners(key, value, 'set', previous);
-        }
+set(key, value, options = {}) {
+    this.ensureMutable();
+
+    if (key.includes('.')) {
+        return this.setPath(key, value, options);
     }
 
+    this.validate(key, value);
+
+    const previous = this.config[key];
+    this.config[key] = value;
+
+    this.autoPersist();
+
+    if (!options.silent) {
+        this.notifyListeners(key, value, 'set', previous);
+    }
+}
     /**
      * Set multiple configuration values at once
      * @param {Partial<T>} values
