@@ -140,8 +140,11 @@ export class Encryption {
             throw new Error("Unsupported future encryption version");
         }
 
-        const iterations = new DataView(data.buffer).getUint32(offset);
-        offset += 4;
+const iterations = new DataView(
+    data.buffer,
+    data.byteOffset,
+    data.byteLength
+).getUint32(offset);
 
         const salt = data.slice(offset, offset + this.SALT_LENGTH);
         offset += this.SALT_LENGTH;
