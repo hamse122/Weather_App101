@@ -259,4 +259,19 @@ export const i18n = new I18n({
     defaultLocale: "en",
     fallbackChain: ["en"],
     strict: false,
+
+    // Optional settings
+    warnOnMissing: true,
+    cacheTranslations: true,
+
+    locales: {
+        en: {
+            appName: "Discountly",
+            welcome: "Welcome to Discountly",
+        },
+        so: {
+            appName: "Discountly",
+            welcome: "Ku soo dhawoow Discountly",
+        },
+    },
 });
