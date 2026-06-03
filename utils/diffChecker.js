@@ -1,17 +1,4 @@
-/**
- * Advanced Diff Checker Utility
- * Line, word, and character-level comparison
- */
-
 export class DiffChecker {
-
-    /**
-     * Compare two texts line-by-line with alignment
-     * @param {string} text1
-     * @param {string} text2
-     * @param {Object} options
-     * @returns {Array<Object>}
-     */
     static compare(text1 = "", text2 = "", options = {}) {
         const {
             ignoreCase = false,
@@ -19,172 +6,239 @@ export class DiffChecker {
         } = options;
 
         const normalize = (line) => {
-            if (trim) line = line.trim();
-            if (ignoreCase) line = line.toLowerCase();
-            return line;
+            let result = line;
+            if (trim) result = result.trim();
+            if (ignoreCase) result = result.toLowerCase();
+            return result;
         };
 
         const lines1 = text1.split("\n");
         const lines2 = text2.split("\n");
 
+        const norm1 = lines1.map(normalize);
+        const norm2 = lines2.map(normalize);
+
+        return this.lineDiff(lines1, lines2, norm1, norm2);
+    }
+
+    static lineDiff(raw1, raw2, norm1, norm2) {
+        const m = norm1.length;
+        const n = norm2.length;
+
+        const dp = Array.from({ length: m + 1 }, () =>
+            Array(n + 1).fill(0)
+        );
+
+        for (let i = m - 1; i >= 0; i--) {
+            for (let j = n - 1; j >= 0; j--) {
+                if (norm1[i] === norm2[j]) {
+                    dp[i][j] = dp[i + 1][j + 1] + 1;
+                } else {
+                    dp[i][j] = Math.max(
+                        dp[i + 1][j],
+                        dp[i][j + 1]
+                    );
+                }
+            }
+        }
+
         const result = [];
-        const max = Math.max(lines1.length, lines2.length);
+        let i = 0;
+        let j = 0;
 
-        for (let i = 0; i < max; i++) {
-            const raw1 = lines1[i];
-            const raw2 = lines2[i];
-
-            const line1 = raw1 !== undefined ? normalize(raw1) : null;
-            const line2 = raw2 !== undefined ? normalize(raw2) : null;
-
-            if (line1 === line2 && line1 !== null) {
+        while (i < m && j < n) {
+            if (norm1[i] === norm2[j]) {
                 result.push({
                     type: "unchanged",
-                    line: raw1,
-                    lineNumber: i + 1
+                    line: raw1[i],
+                    oldLineNumber: i + 1,
+                    newLineNumber: j + 1
                 });
-            } else if (line1 !== null && line2 === null) {
+                i++;
+                j++;
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
                 result.push({
                     type: "removed",
-                    line: raw1,
-                    lineNumber: i + 1
+                    line: raw1[i],
+                    oldLineNumber: i + 1
                 });
-            } else if (line1 === null && line2 !== null) {
-                result.push({
-                    type: "added",
-                    line: raw2,
-                    lineNumber: i + 1
-                });
+                i++;
             } else {
                 result.push({
-                    type: "modified",
-                    oldLine: raw1,
-                    newLine: raw2,
-                    wordDiff: this.wordDiff(raw1, raw2),
-                    lineNumber: i + 1
+                    type: "added",
+                    line: raw2[j],
+                    newLineNumber: j + 1
                 });
+                j++;
+            }
+        }
+
+        while (i < m) {
+            result.push({
+                type: "removed",
+                line: raw1[i],
+                oldLineNumber: i + 1
+            });
+            i++;
+        }
+
+        while (j < n) {
+            result.push({
+                type: "added",
+                line: raw2[j],
+                newLineNumber: j + 1
+            });
+            j++;
+        }
+
+        return result;
+    }
+
+    static wordDiff(oldLine = "", newLine = "") {
+        const oldWords = oldLine.split(/\s+/);
+        const newWords = newLine.split(/\s+/);
+
+        const result = [];
+
+        const max = Math.max(
+            oldWords.length,
+            newWords.length
+        );
+
+        for (let i = 0; i < max; i++) {
+            const oldWord = oldWords[i];
+            const newWord = newWords[i];
+
+            if (oldWord === newWord) {
+                result.push({
+                    type: "unchanged",
+                    value: oldWord
+                });
+            } else {
+                if (oldWord) {
+                    result.push({
+                        type: "removed",
+                        value: oldWord
+                    });
+                }
+
+                if (newWord) {
+                    result.push({
+                        type: "added",
+                        value: newWord
+                    });
+                }
             }
         }
 
         return result;
     }
 
-    /**
-     * Word-level diff for modified lines
-     * @param {string} oldLine
-     * @param {string} newLine
-     */
-    static wordDiff(oldLine = "", newLine = "") {
-        const oldWords = oldLine.split(/\s+/);
-        const newWords = newLine.split(/\s+/);
-
-        const diff = [];
-        const max = Math.max(oldWords.length, newWords.length);
-
-        for (let i = 0; i < max; i++) {
-            if (oldWords[i] === newWords[i]) {
-                diff.push({ type: "unchanged", value: oldWords[i] });
-            } else {
-                if (oldWords[i]) diff.push({ type: "removed", value: oldWords[i] });
-                if (newWords[i]) diff.push({ type: "added", value: newWords[i] });
-            }
-        }
-
-        return diff;
-    }
-
-    /**
-     * Generate a unified diff patch
-     * @param {Array<Object>} diff
-     * @param {string} fileA
-     * @param {string} fileB
-     * @returns {string}
-     */
     static generatePatch(diff, fileA = "a/file", fileB = "b/file") {
-        let patch = `--- ${fileA}\n+++ ${fileB}\n`;
+        const lines = [
+            `--- ${fileA}`,
+            `+++ ${fileB}`
+        ];
 
         diff.forEach(change => {
             switch (change.type) {
-                case "removed":
-                    patch += `- ${change.line}\n`;
-                    break;
                 case "added":
-                    patch += `+ ${change.line}\n`;
+                    lines.push(`+ ${change.line}`);
                     break;
+
+                case "removed":
+                    lines.push(`- ${change.line}`);
+                    break;
+
                 case "modified":
-                    patch += `- ${change.oldLine}\n`;
-                    patch += `+ ${change.newLine}\n`;
+                    lines.push(`- ${change.oldLine}`);
+                    lines.push(`+ ${change.newLine}`);
                     break;
+
                 default:
-                    patch += `  ${change.line}\n`;
+                    lines.push(`  ${change.line}`);
             }
         });
 
-        return patch.trimEnd();
+        return lines.join("\n");
     }
 
-    /**
-     * Hybrid similarity score (0–1)
-     * Combines line and character similarity
-     */
     static similarity(text1 = "", text2 = "") {
         if (!text1 && !text2) return 1;
         if (!text1 || !text2) return 0;
 
         const charScore = this.charSimilarity(text1, text2);
-        const lineScore = this.lineSimilarity(text1, text2);
 
-        return Number(((charScore + lineScore) / 2).toFixed(3));
+        const lines1 = text1.split("\n");
+        const lines2 = text2.split("\n");
+
+        const common = this.lcs(lines1, lines2);
+
+        const lineScore =
+            common /
+            Math.max(lines1.length, lines2.length);
+
+        return Number(
+            ((charScore + lineScore) / 2).toFixed(3)
+        );
     }
 
-    /**
-     * Character-level similarity
-     */
+    static lcs(a, b) {
+        const m = a.length;
+        const n = b.length;
+
+        const dp = Array.from(
+            { length: m + 1 },
+            () => Array(n + 1).fill(0)
+        );
+
+        for (let i = 1; i <= m; i++) {
+            for (let j = 1; j <= n; j++) {
+                dp[i][j] =
+                    a[i - 1] === b[j - 1]
+                        ? dp[i - 1][j - 1] + 1
+                        : Math.max(
+                              dp[i - 1][j],
+                              dp[i][j - 1]
+                          );
+            }
+        }
+
+        return dp[m][n];
+    }
+
     static charSimilarity(a, b) {
-        const longer = a.length > b.length ? a : b;
-        const shorter = a.length > b.length ? b : a;
+        const distance = this.editDistance(a, b);
+        const maxLength = Math.max(a.length, b.length);
 
-        if (longer.length === 0) return 1;
-
-        const distance = this.editDistance(longer, shorter);
-        return (longer.length - distance) / longer.length;
+        return maxLength === 0
+            ? 1
+            : (maxLength - distance) / maxLength;
     }
 
-    /**
-     * Line-level similarity
-     */
-    static lineSimilarity(a, b) {
-        const aLines = a.split("\n");
-        const bLines = b.split("\n");
+    static editDistance(a = "", b = "") {
+        const dp = Array.from(
+            { length: b.length + 1 },
+            (_, i) => i
+        );
 
-        const matches = aLines.filter((l, i) => l === bLines[i]).length;
-        return matches / Math.max(aLines.length, bLines.length);
-    }
-
-    /**
-     * Optimized Levenshtein distance
-     */
-    static editDistance(s1 = "", s2 = "") {
-        s1 = s1.toLowerCase();
-        s2 = s2.toLowerCase();
-
-        const dp = Array.from({ length: s2.length + 1 }, (_, i) => i);
-
-        for (let i = 1; i <= s1.length; i++) {
+        for (let i = 1; i <= a.length; i++) {
             let prev = dp[0];
             dp[0] = i;
 
-            for (let j = 1; j <= s2.length; j++) {
+            for (let j = 1; j <= b.length; j++) {
                 const temp = dp[j];
+
                 dp[j] = Math.min(
                     dp[j] + 1,
                     dp[j - 1] + 1,
-                    prev + (s1[i - 1] === s2[j - 1] ? 0 : 1)
+                    prev + (a[i - 1] === b[j - 1] ? 0 : 1)
                 );
+
                 prev = temp;
             }
         }
 
-        return dp[s2.length];
+        return dp[b.length];
     }
 }
