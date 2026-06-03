@@ -215,6 +215,7 @@ class DatabaseManager {
             }
         };
     }
+    
 
     /* ---------------------------------- */
     /* Shutdown                           */
