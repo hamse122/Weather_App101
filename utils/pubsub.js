@@ -1,11 +1,5 @@
-o/**
- * Advanced PubSub v2 (Upgraded)
- * - Priority subscribers
- * - Middleware pipeline (next)
- * - Parallel / sequential publish
- * - Dead-letter queue
- * - Pattern cache
- * - Global pause
+/**
+ * PubSub v2.1 (Hardened + Optimized)
  */
 
 class PubSub {
@@ -20,39 +14,51 @@ class PubSub {
     constructor({
         maxHistory = 100,
         historyTTL = null,
-        parallel = true
+        parallel = true,
+        maxDeadLetters = 1000
     } = {}) {
         this.maxHistory = maxHistory;
         this.historyTTL = historyTTL;
         this.parallel = parallel;
+        this.maxDeadLetters = maxDeadLetters;
+
+        this.now = typeof performance !== "undefined"
+            ? () => performance.now()
+            : () => Date.now();
     }
 
-    /* =========================
-       Middleware (Koa-style)
-    ========================== */
+    /* ================= Middleware ================= */
 
     use(fn) {
         if (typeof fn !== 'function') {
             throw new Error('Middleware must be a function');
         }
         this.#middleware.push(fn);
+        this.#patternCache.clear();
     }
 
     async #runMiddleware(ctx, final) {
         let index = -1;
-        const dispatch = async i => {
-            if (i <= index) throw new Error('next() called twice');
+
+        const dispatch = async (i) => {
+            if (i <= index) throw new Error('next() called multiple times');
             index = i;
-            const fn = this.#middleware[i] || final;
-            if (!fn) return;
-            return fn(ctx, () => dispatch(i + 1));
+
+            const fn = this.#middleware[i];
+            if (!fn) return final?.();
+
+            try {
+                return await fn(ctx, () => dispatch(i + 1));
+            } catch (err) {
+                ctx.error = err;
+                throw err;
+            }
         };
+
         return dispatch(0);
     }
 
-    /* =========================
-       Subscriptions
-    ========================== */
+    /* ================= Subscriptions ================= */
 
     subscribe(channel, callback, { replay = 0, priority = 0 } = {}) {
         if (!this.#channels.has(channel)) {
@@ -72,74 +78,74 @@ class PubSub {
     }
 
     once(channel, callback, opts = {}) {
-        const off = this.subscribe(channel, (d, c, t) => {
-            off();
+        let off;
+        off = this.subscribe(channel, (d, c, t) => {
+            off?.();
             callback(d, c, t);
         }, opts);
+
+        return off;
     }
 
     unsubscribe(channel, sub) {
         const set = this.#channels.get(channel);
         if (!set) return;
+
         set.delete(sub);
+
         if (!set.size) {
             this.#channels.delete(channel);
             this.#patternCache.clear();
         }
     }
 
-    /* =========================
-       Publishing
-    ========================== */
+    /* ================= Publish ================= */
 
     async publish(channel, data) {
         if (this.#globallyPaused || this.#paused.has(channel)) {
             return { delivered: 0, blocked: true };
         }
 
-        const message = {
-            channel,
-            data,
-            timestamp: Date.now()
-        };
-
+        const message = { channel, data, timestamp: Date.now() };
         this.#storeHistory(channel, message);
 
-        const ctx = { message, cancelled: false };
+        const ctx = { message };
 
-        const start = performance.now();
+        const start = this.now();
+
+        let subs;
+        try {
+            subs = this.#matchSubscribers(channel);
+        } catch (err) {
+            return { delivered: 0, error: err.message };
+        }
+
+        subs.sort((a, b) => b.priority - a.priority);
+
+        const execute = async (sub) => {
+            try {
+                await sub.callback(data, channel, message.timestamp);
+            } catch (err) {
+                this.#pushDeadLetter({ err, message });
+            }
+        };
 
         await this.#runMiddleware(ctx, async () => {
-            const subs = this.#matchSubscribers(channel)
-                .sort((a, b) => b.priority - a.priority);
-
-            const execute = async sub => {
-                try {
-                    await sub.callback(data, channel, message.timestamp);
-                    return true;
-                } catch (err) {
-                    this.#deadLetters.push({ err, message });
-                    return false;
-                }
-            };
-
             if (this.parallel) {
-                await Promise.all(subs.map(execute));
+                await Promise.allSettled(subs.map(execute));
             } else {
                 for (const s of subs) await execute(s);
             }
         });
 
         return {
-            delivered: this.getSubscriberCount(channel),
-            duration: performance.now() - start,
+            delivered: subs.length,
+            duration: this.now() - start,
             deadLetters: this.#deadLetters.length
         };
     }
 
-    /* =========================
-       History
-    ========================== */
+    /* ================= History ================= */
 
     #storeHistory(channel, message) {
         let history = this.#history.get(channel);
@@ -150,8 +156,8 @@ class PubSub {
 
         history.push(message);
 
-        while (history.length > this.maxHistory) {
-            history.shift();
+        if (history.length > this.maxHistory) {
+            history.splice(0, history.length - this.maxHistory);
         }
 
         if (this.historyTTL) {
@@ -166,9 +172,7 @@ class PubSub {
         return (this.#history.get(channel) || []).slice(-limit);
     }
 
-    /* =========================
-       Pause Control
-    ========================== */
+    /* ================= Pause ================= */
 
     pause(channel = null) {
         channel ? this.#paused.add(channel) : this.#globallyPaused = true;
@@ -178,34 +182,44 @@ class PubSub {
         channel ? this.#paused.delete(channel) : this.#globallyPaused = false;
     }
 
-    /* =========================
-       Matching (Cached)
-    ========================== */
+    /* ================= Matching ================= */
 
     #matchSubscribers(channel) {
         if (this.#patternCache.has(channel)) {
             return this.#patternCache.get(channel);
         }
 
-        const matched = new Set();
+        const matched = [];
 
         for (const [key, subs] of this.#channels.entries()) {
-            if (
-                key === channel ||
+            const isWildcard =
                 key === '*' ||
-                (key.endsWith('*') && channel.startsWith(key.slice(0, -1)))
-            ) {
-                subs.forEach(s => matched.add(s));
+                (key.endsWith('*') && channel.startsWith(key.slice(0, -1)));
+
+            if (key === channel || isWildcard) {
+                for (const s of subs) matched.push(s);
             }
         }
 
-        this.#patternCache.set(channel, [...matched]);
-        return [...matched];
+        this.#patternCache.set(channel, matched);
+        return matched;
     }
 
-    /* =========================
-       Utilities
-    ========================== */
+    /* ================= Dead Letters ================= */
+
+    #pushDeadLetter(entry) {
+        this.#deadLetters.push(entry);
+
+        if (this.#deadLetters.length > this.maxDeadLetters) {
+            this.#deadLetters.shift();
+        }
+    }
+
+    getDeadLetters() {
+        return [...this.#deadLetters];
+    }
+
+    /* ================= Utils ================= */
 
     getSubscriberCount(channel = null) {
         if (channel) return this.#channels.get(channel)?.size || 0;
@@ -214,10 +228,6 @@ class PubSub {
 
     getChannels() {
         return [...this.#channels.keys()];
-    }
-
-    getDeadLetters() {
-        return [...this.#deadLetters];
     }
 
     reset() {
