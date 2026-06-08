@@ -133,33 +133,70 @@ export class Serialization {
      * DEEP CLONE (CIRCULAR-SAFE)
      ********************************************************************/
 
-    static deepClone(obj) {
-        const seen = new WeakMap();
+static deepClone(obj) {
+    const seen = new WeakMap();
 
-        function clone(value) {
-            if (typeof value !== "object" || value === null) return value;
+    const clone = (value) => {
+        if (value === null || typeof value !== "object")
+            return value;
 
-            if (seen.has(value)) return seen.get(value);
+        if (seen.has(value))
+            return seen.get(value);
 
-            let result;
+        if (value instanceof Date)
+            return new Date(value);
 
-            if (Array.isArray(value)) {
-                result = [];
-                seen.set(value, result);
-                value.forEach((v, i) => (result[i] = clone(v)));
-                return result;
-            }
+        if (value instanceof RegExp)
+            return new RegExp(value.source, value.flags);
 
-            result = {};
-            seen.set(value, result);
-            for (const [k, v] of Object.entries(value)) {
-                result[k] = clone(v);
-            }
-            return result;
+        if (value instanceof Map) {
+            const map = new Map();
+            seen.set(value, map);
+
+            value.forEach((v, k) => {
+                map.set(clone(k), clone(v));
+            });
+
+            return map;
         }
 
-        return clone(obj);
-    }
+        if (value instanceof Set) {
+            const set = new Set();
+            seen.set(value, set);
+
+            value.forEach(v => {
+                set.add(clone(v));
+            });
+
+            return set;
+        }
+
+        if (Array.isArray(value)) {
+            const arr = [];
+            seen.set(value, arr);
+
+            value.forEach((v, i) => {
+                arr[i] = clone(v);
+            });
+
+            return arr;
+        }
+
+        const result = Object.create(
+            Object.getPrototypeOf(value)
+        );
+
+        seen.set(value, result);
+
+        Reflect.ownKeys(value).forEach(key => {
+            result[key] = clone(value[key]);
+        });
+
+        return result;
+    };
+
+    return clone(obj);
+}
 
     /********************************************************************
      * TYPE-SAFE SERIALIZATION + DESERIALIZER
