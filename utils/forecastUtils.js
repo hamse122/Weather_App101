@@ -1,53 +1,97 @@
 function groupForecastByDate(list = []) {
-  const byDate = {};
+  const byDate = new Map();
+
   if (!Array.isArray(list)) return byDate;
+
   for (const item of list) {
     const dtTxt = item?.dt_txt;
     if (typeof dtTxt !== "string") continue;
-    const [dateStr] = dtTxt.split(" ");
-    if (!dateStr) continue;
-    (byDate[dateStr] ||= []).push(item);
+
+    const dateStr = dtTxt.slice(0, 10); // YYYY-MM-DD
+
+    if (!byDate.has(dateStr)) {
+      byDate.set(dateStr, []);
+    }
+
+    byDate.get(dateStr).push(item);
   }
+
   return byDate;
 }
 
-function summarizeDailyForecast(list = [], { days = 5 } = {}) {
+function summarizeDailyForecast(
+  list = [],
+  {
+    days = 5,
+    includeAverage = true,
+  } = {}
+) {
   const byDate = groupForecastByDate(list);
-  const dateKeys = Object.keys(byDate).sort();
 
-  const out = [];
-  for (const dateStr of dateKeys) {
-    const entries = byDate[dateStr];
-    if (!Array.isArray(entries) || entries.length === 0) continue;
+  return [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, days)
+    .map(([dateStr, entries]) => {
+      let minTemp = Infinity;
+      let maxTemp = -Infinity;
+      let tempSum = 0;
+      let tempCount = 0;
 
-    let min = Infinity;
-    let max = -Infinity;
-    for (const e of entries) {
-      const tMin = e?.main?.temp_min;
-      const tMax = e?.main?.temp_max;
-      if (typeof tMin === "number" && Number.isFinite(tMin)) min = Math.min(min, tMin);
-      if (typeof tMax === "number" && Number.isFinite(tMax)) max = Math.max(max, tMax);
-    }
+      const weatherCounts = new Map();
 
-    const noon =
-      entries.find((e) => typeof e?.dt_txt === "string" && e.dt_txt.includes("12:00:00")) ||
-      entries[Math.floor(entries.length / 2)];
-    const w = noon?.weather?.[0] || entries[0]?.weather?.[0] || {};
+      for (const entry of entries) {
+        const main = entry?.main;
 
-    out.push({
-      dateStr,
-      min: Number.isFinite(min) ? Math.round(min) : null,
-      max: Number.isFinite(max) ? Math.round(max) : null,
-      icon: w.icon || null,
-      main: w.main || null,
-      desc: w.description || null,
+        if (Number.isFinite(main?.temp_min)) {
+          minTemp = Math.min(minTemp, main.temp_min);
+        }
+
+        if (Number.isFinite(main?.temp_max)) {
+          maxTemp = Math.max(maxTemp, main.temp_max);
+        }
+
+        if (Number.isFinite(main?.temp)) {
+          tempSum += main.temp;
+          tempCount++;
+        }
+
+        const weather = entry?.weather?.[0];
+        if (weather?.main) {
+          weatherCounts.set(
+            weather.main,
+            (weatherCounts.get(weather.main) || 0) + 1
+          );
+        }
+      }
+
+      const representative =
+        entries.find(e => e?.dt_txt?.includes("12:00:00")) ??
+        entries[Math.floor(entries.length / 2)] ??
+        {};
+
+      const weather = representative.weather?.[0] || {};
+
+      const dominantWeather =
+        [...weatherCounts.entries()]
+          .sort((a, b) => b[1] - a[1])[0]?.[0] ?? weather.main ?? null;
+
+      return {
+        date: dateStr,
+        min: Number.isFinite(minTemp) ? Math.round(minTemp) : null,
+        max: Number.isFinite(maxTemp) ? Math.round(maxTemp) : null,
+        avg:
+          includeAverage && tempCount
+            ? Math.round(tempSum / tempCount)
+            : null,
+        weather: dominantWeather,
+        description: weather.description ?? null,
+        icon: weather.icon ?? null,
+        entries: entries.length,
+      };
     });
-
-    if (out.length >= days) break;
-  }
-
-  return out;
 }
 
-module.exports = { groupForecastByDate, summarizeDailyForecast };
-
+module.exports = {
+  groupForecastByDate,
+  summarizeDailyForecast,
+};
