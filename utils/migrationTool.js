@@ -57,16 +57,25 @@ class MigrationTool {
         }
     }
 
-    async releaseLock(connection) {
-        await connection.query(`DELETE FROM ${this.lockTable} WHERE id = 1`);
-    }
+let locked = false;
 
-    async appliedMigrations(connection) {
-        const result = await connection.query(
-            `SELECT id, checksum FROM ${this.tableName} ORDER BY id ASC`
-        );
-        return result.rows;
+try {
+    await this.acquireLock(connection);
+    locked = true;
+
+    ...
+}
+catch (err) {
+    await connection.query("ROLLBACK");
+    throw err;
+}
+finally {
+    if (locked) {
+        try {
+            await this.releaseLock(connection);
+        } catch {}
     }
+}
 
     async validateChecksums(appliedMap) {
         for (const m of this.migrations) {
