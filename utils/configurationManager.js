@@ -87,12 +87,15 @@ export class ConfigurationManager {
         this.validators.set(key, validator);
     }
 
-    /**
-     * Set a configuration value
-
-     */
-set(key, value, options = {}) {
+/**
+ * Set a configuration value
+ */
+async set(key, value, options = {}) {
     this.ensureMutable();
+
+    if (typeof key !== 'string' || !key.trim()) {
+        throw new TypeError('Configuration key must be a non-empty string.');
+    }
 
     if (key.includes('.')) {
         return this.setPath(key, value, options);
@@ -101,13 +104,26 @@ set(key, value, options = {}) {
     this.validate(key, value);
 
     const previous = this.config[key];
+
+    // Skip if value didn't change
+    if (!options.force && Object.is(previous, value)) {
+        return this;
+    }
+
     this.config[key] = value;
 
-    this.autoPersist();
+    // Persist if enabled
+    const result = this.autoPersist();
+    if (result instanceof Promise) {
+        await result;
+    }
 
+    // Notify listeners unless silenced
     if (!options.silent) {
         this.notifyListeners(key, value, 'set', previous);
     }
+
+    return this;
 }
     /**
      * Set multiple configuration values at once
