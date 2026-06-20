@@ -2,47 +2,57 @@ export class DiffChecker {
     static compare(text1 = "", text2 = "", options = {}) {
         const {
             ignoreCase = false,
-            trim = false
+            trim = false,
+            detectModified = true
         } = options;
 
         const normalize = (line) => {
-            let result = line;
-            if (trim) result = result.trim();
-            if (ignoreCase) result = result.toLowerCase();
-            return result;
+            let value = line;
+
+            if (trim) value = value.trim();
+            if (ignoreCase) value = value.toLowerCase();
+
+            return value;
         };
 
-        const lines1 = text1.split("\n");
-        const lines2 = text2.split("\n");
+        const raw1 = text1.split("\n");
+        const raw2 = text2.split("\n");
 
-        const norm1 = lines1.map(normalize);
-        const norm2 = lines2.map(normalize);
+        const norm1 = raw1.map(normalize);
+        const norm2 = raw2.map(normalize);
 
-        return this.lineDiff(lines1, lines2, norm1, norm2);
+        let diff = this.lineDiff(raw1, raw2, norm1, norm2);
+
+        if (detectModified) {
+            diff = this.mergeModified(diff);
+        }
+
+        return diff;
     }
 
     static lineDiff(raw1, raw2, norm1, norm2) {
         const m = norm1.length;
         const n = norm2.length;
 
-        const dp = Array.from({ length: m + 1 }, () =>
-            Array(n + 1).fill(0)
+        const dp = Array.from(
+            { length: m + 1 },
+            () => Array(n + 1).fill(0)
         );
 
         for (let i = m - 1; i >= 0; i--) {
             for (let j = n - 1; j >= 0; j--) {
-                if (norm1[i] === norm2[j]) {
-                    dp[i][j] = dp[i + 1][j + 1] + 1;
-                } else {
-                    dp[i][j] = Math.max(
-                        dp[i + 1][j],
-                        dp[i][j + 1]
-                    );
-                }
+                dp[i][j] =
+                    norm1[i] === norm2[j]
+                        ? dp[i + 1][j + 1] + 1
+                        : Math.max(
+                              dp[i + 1][j],
+                              dp[i][j + 1]
+                          );
             }
         }
 
         const result = [];
+
         let i = 0;
         let j = 0;
 
@@ -54,6 +64,7 @@ export class DiffChecker {
                     oldLineNumber: i + 1,
                     newLineNumber: j + 1
                 });
+
                 i++;
                 j++;
             } else if (dp[i + 1][j] >= dp[i][j + 1]) {
@@ -62,6 +73,7 @@ export class DiffChecker {
                     line: raw1[i],
                     oldLineNumber: i + 1
                 });
+
                 i++;
             } else {
                 result.push({
@@ -69,6 +81,7 @@ export class DiffChecker {
                     line: raw2[j],
                     newLineNumber: j + 1
                 });
+
                 j++;
             }
         }
@@ -79,6 +92,7 @@ export class DiffChecker {
                 line: raw1[i],
                 oldLineNumber: i + 1
             });
+
             i++;
         }
 
@@ -88,98 +102,153 @@ export class DiffChecker {
                 line: raw2[j],
                 newLineNumber: j + 1
             });
+
             j++;
         }
 
         return result;
     }
 
-    static wordDiff(oldLine = "", newLine = "") {
-        const oldWords = oldLine.split(/\s+/);
-        const newWords = newLine.split(/\s+/);
+    static mergeModified(diff) {
+        const merged = [];
+
+        for (let i = 0; i < diff.length; i++) {
+            const current = diff[i];
+            const next = diff[i + 1];
+
+            if (
+                current?.type === "removed" &&
+                next?.type === "added"
+            ) {
+                merged.push({
+                    type: "modified",
+                    oldLine: current.line,
+                    newLine: next.line,
+                    oldLineNumber:
+                        current.oldLineNumber,
+                    newLineNumber:
+                        next.newLineNumber,
+                    words: this.wordDiff(
+                        current.line,
+                        next.line
+                    )
+                });
+
+                i++;
+                continue;
+            }
+
+            merged.push(current);
+        }
+
+        return merged;
+    }
+
+    static wordDiff(oldText = "", newText = "") {
+        const oldWords = oldText.split(/\s+/);
+        const newWords = newText.split(/\s+/);
+
+        const m = oldWords.length;
+        const n = newWords.length;
+
+        const dp = Array.from(
+            { length: m + 1 },
+            () => Array(n + 1).fill(0)
+        );
+
+        for (let i = m - 1; i >= 0; i--) {
+            for (let j = n - 1; j >= 0; j--) {
+                dp[i][j] =
+                    oldWords[i] === newWords[j]
+                        ? dp[i + 1][j + 1] + 1
+                        : Math.max(
+                              dp[i + 1][j],
+                              dp[i][j + 1]
+                          );
+            }
+        }
 
         const result = [];
 
-        const max = Math.max(
-            oldWords.length,
-            newWords.length
-        );
+        let i = 0;
+        let j = 0;
 
-        for (let i = 0; i < max; i++) {
-            const oldWord = oldWords[i];
-            const newWord = newWords[i];
-
-            if (oldWord === newWord) {
+        while (i < m && j < n) {
+            if (oldWords[i] === newWords[j]) {
                 result.push({
                     type: "unchanged",
-                    value: oldWord
+                    value: oldWords[i]
+                });
+
+                i++;
+                j++;
+            } else if (
+                dp[i + 1][j] >= dp[i][j + 1]
+            ) {
+                result.push({
+                    type: "removed",
+                    value: oldWords[i++]
                 });
             } else {
-                if (oldWord) {
-                    result.push({
-                        type: "removed",
-                        value: oldWord
-                    });
-                }
-
-                if (newWord) {
-                    result.push({
-                        type: "added",
-                        value: newWord
-                    });
-                }
+                result.push({
+                    type: "added",
+                    value: newWords[j++]
+                });
             }
+        }
+
+        while (i < m) {
+            result.push({
+                type: "removed",
+                value: oldWords[i++]
+            });
+        }
+
+        while (j < n) {
+            result.push({
+                type: "added",
+                value: newWords[j++]
+            });
         }
 
         return result;
     }
 
-    static generatePatch(diff, fileA = "a/file", fileB = "b/file") {
-        const lines = [
-            `--- ${fileA}`,
-            `+++ ${fileB}`
-        ];
+    static statistics(diff = []) {
+        return diff.reduce(
+            (stats, item) => {
+                stats[item.type] =
+                    (stats[item.type] || 0) + 1;
 
-        diff.forEach(change => {
-            switch (change.type) {
-                case "added":
-                    lines.push(`+ ${change.line}`);
-                    break;
-
-                case "removed":
-                    lines.push(`- ${change.line}`);
-                    break;
-
-                case "modified":
-                    lines.push(`- ${change.oldLine}`);
-                    lines.push(`+ ${change.newLine}`);
-                    break;
-
-                default:
-                    lines.push(`  ${change.line}`);
+                return stats;
+            },
+            {
+                added: 0,
+                removed: 0,
+                modified: 0,
+                unchanged: 0
             }
-        });
-
-        return lines.join("\n");
+        );
     }
 
-    static similarity(text1 = "", text2 = "") {
-        if (!text1 && !text2) return 1;
-        if (!text1 || !text2) return 0;
+    static similarity(a = "", b = "") {
+        if (!a && !b) return 1;
+        if (!a || !b) return 0;
 
-        const charScore = this.charSimilarity(text1, text2);
+        const edit =
+            1 -
+            this.editDistance(a, b) /
+                Math.max(a.length, b.length);
 
-        const lines1 = text1.split("\n");
-        const lines2 = text2.split("\n");
+        const linesA = a.split("\n");
+        const linesB = b.split("\n");
 
-        const common = this.lcs(lines1, lines2);
-
-        const lineScore =
-            common /
-            Math.max(lines1.length, lines2.length);
+        const lcs =
+            this.lcs(linesA, linesB) /
+            Math.max(linesA.length, linesB.length);
 
         return Number(
-            ((charScore + lineScore) / 2).toFixed(3)
+            ((edit + lcs) / 2).toFixed(3)
         );
     }
 
@@ -207,15 +276,6 @@ export class DiffChecker {
         return dp[m][n];
     }
 
-    static charSimilarity(a, b) {
-        const distance = this.editDistance(a, b);
-        const maxLength = Math.max(a.length, b.length);
-
-        return maxLength === 0
-            ? 1
-            : (maxLength - distance) / maxLength;
-    }
-
     static editDistance(a = "", b = "") {
         const dp = Array.from(
             { length: b.length + 1 },
@@ -224,6 +284,7 @@ export class DiffChecker {
 
         for (let i = 1; i <= a.length; i++) {
             let prev = dp[0];
+
             dp[0] = i;
 
             for (let j = 1; j <= b.length; j++) {
@@ -232,7 +293,10 @@ export class DiffChecker {
                 dp[j] = Math.min(
                     dp[j] + 1,
                     dp[j - 1] + 1,
-                    prev + (a[i - 1] === b[j - 1] ? 0 : 1)
+                    prev +
+                        (a[i - 1] === b[j - 1]
+                            ? 0
+                            : 1)
                 );
 
                 prev = temp;
