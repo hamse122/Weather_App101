@@ -78,6 +78,41 @@ class DataPipeline {
         }
     }
 
+        /* =========================
+Architecture
+    ========================= */
+
+    class DataPipeline {
+    constructor(options = {}) {
+        this.stages = [];
+        this.context = new Map();
+
+        this.plugins = [];
+        this.middlewares = [];
+
+        this.eventListeners = new Map();
+
+        this.cache = options.cacheAdapter || new MemoryCache();
+
+        this.abortController = new AbortController();
+
+        this.circuitBreaker = {
+            failures: 0,
+            threshold: options.breakerThreshold ?? 5,
+            resetTimeout: options.breakerReset ?? 30000,
+            state: "CLOSED",
+            openedAt: null
+        };
+
+        this.metrics = {
+            executions: 0,
+            failures: 0,
+            totalTime: 0,
+            stageTimes: {}
+        };
+    }
+}
+
     /* =========================
        CORE PROCESSOR
     ========================= */
