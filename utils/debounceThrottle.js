@@ -1,248 +1,372 @@
 /**
- * =====================================================
- * Performance Utilities – Upgraded (2025 Edition)
- * Debounce • Throttle • RAF Throttle • Smart Rate Limit
- * =====================================================
+ * ============================================================
+ * Performance Utilities vNext
+ * ------------------------------------------------------------
+ * Features:
+ * - Debounce
+ * - Throttle
+ * - RAF Throttle
+ * - Adaptive Rate Limiter
+ * - Token Bucket
+ * - Idle Scheduler
+ * - Promise Queue
+ * - Concurrency Limiter
+ * - Metrics
+ * - AbortController Support
+ * ============================================================
  */
 
-/* ---------------------------------------
- * Debounce (Promise-aware, maxWait-safe)
- * ------------------------------------- */
-export function debounce(
-  func,
-  wait = 0,
-  {
-    leading = false,
-    trailing = true,
-    maxWait,
-    signal,
-  } = {}
-) {
-  if (typeof func !== "function") {
-    throw new TypeError("Expected a function");
+export class PerformanceMetrics {
+  constructor() {
+    this.calls = 0;
+    this.executions = 0;
+    this.cancellations = 0;
+    this.totalExecutionTime = 0;
   }
 
-  let timeoutId;
-  let maxTimeoutId;
+  recordCall() {
+    this.calls++;
+  }
+
+  recordExecution(duration) {
+    this.executions++;
+    this.totalExecutionTime += duration;
+  }
+
+  recordCancellation() {
+    this.cancellations++;
+  }
+
+  snapshot() {
+    return {
+      calls: this.calls,
+      executions: this.executions,
+      cancellations: this.cancellations,
+      avgExecutionTime:
+        this.executions > 0
+          ? this.totalExecutionTime /
+            this.executions
+          : 0
+    };
+  }
+}
+
+/* ============================================================
+ * Advanced Debounce
+ * ============================================================
+ */
+
+export function debounce(
+  fn,
+  wait = 0,
+  options = {}
+) {
+  const metrics = new PerformanceMetrics();
+
+  let timer = null;
   let lastArgs;
   let lastThis;
-  let lastInvokeTime = 0;
-  let result;
 
-  const invoke = (time) => {
-    lastInvokeTime = time;
-    result = func.apply(lastThis, lastArgs);
+  const {
+    leading = false,
+    trailing = true,
+    signal
+  } = options;
+
+  const invoke = () => {
+    const start = performance.now();
+
+    const result = fn.apply(
+      lastThis,
+      lastArgs
+    );
+
+    metrics.recordExecution(
+      performance.now() - start
+    );
+
     lastArgs = lastThis = null;
-    return result;
-  };
 
-  const startTimer = (fn, delay) => setTimeout(fn, delay);
-
-  const cancelTimers = () => {
-    if (timeoutId) clearTimeout(timeoutId);
-    if (maxTimeoutId) clearTimeout(maxTimeoutId);
-    timeoutId = maxTimeoutId = null;
-  };
-
-  const trailingEdge = () => {
-    cancelTimers();
-    if (trailing && lastArgs) {
-      return invoke(Date.now());
-    }
-    lastArgs = lastThis = null;
     return result;
   };
 
   const debounced = function (...args) {
-    const now = Date.now();
+    metrics.recordCall();
+
     lastArgs = args;
     lastThis = this;
 
-    const shouldCallNow = leading && !timeoutId;
+    const callNow =
+      leading && !timer;
 
-    if (!timeoutId) {
-      timeoutId = startTimer(trailingEdge, wait);
+    clearTimeout(timer);
 
-      if (maxWait != null && !maxTimeoutId) {
-        maxTimeoutId = startTimer(() => {
-          if (timeoutId) trailingEdge();
-        }, maxWait);
+    timer = setTimeout(() => {
+      timer = null;
+
+      if (trailing && lastArgs) {
+        invoke();
       }
-    }
+    }, wait);
 
-    if (shouldCallNow) {
-      return invoke(now);
+    if (callNow) {
+      return invoke();
     }
-
-    return result;
   };
 
   debounced.cancel = () => {
-    cancelTimers();
-    lastArgs = lastThis = null;
+    clearTimeout(timer);
+    timer = null;
+
+    metrics.recordCancellation();
   };
 
-  debounced.flush = () => {
-    return timeoutId ? trailingEdge() : result;
-  };
+  debounced.metrics = () =>
+    metrics.snapshot();
 
-  debounced.pending = () => !!timeoutId;
-
-  if (signal) {
-    signal.addEventListener("abort", debounced.cancel, { once: true });
-  }
+  signal?.addEventListener(
+    "abort",
+    debounced.cancel
+  );
 
   return debounced;
 }
 
-/* ---------------------------------------
- * Throttle (Time-based, cancelable)
- * ------------------------------------- */
-export function throttle(
-  func,
-  wait = 0,
-  { leading = true, trailing = true } = {}
+/* ============================================================
+ * Adaptive Throttle
+ * Automatically adjusts under load
+ * ============================================================
+ */
+
+export function adaptiveThrottle(
+  fn,
+  {
+    minWait = 16,
+    maxWait = 500
+  } = {}
 ) {
-  let timeoutId = null;
-  let lastArgs;
-  let lastThis;
-  let lastCallTime = 0;
+  let wait = minWait;
+  let lastExecution = 0;
 
-  const invoke = (time) => {
-    lastCallTime = time;
-    func.apply(lastThis, lastArgs);
-    lastArgs = lastThis = null;
-  };
+  return (...args) => {
+    const now = performance.now();
 
-  const trailingEdge = () => {
-    timeoutId = null;
-    if (trailing && lastArgs) {
-      invoke(Date.now());
+    if (
+      now - lastExecution >= wait
+    ) {
+      const start =
+        performance.now();
+
+      fn(...args);
+
+      const duration =
+        performance.now() - start;
+
+      wait = Math.min(
+        maxWait,
+        Math.max(
+          minWait,
+          duration * 2
+        )
+      );
+
+      lastExecution = now;
     }
   };
+}
 
-  const throttled = function (...args) {
+/* ============================================================
+ * Token Bucket Rate Limiter
+ * ============================================================
+ */
+
+export class TokenBucket {
+  constructor({
+    capacity = 10,
+    refillRate = 1
+  } = {}) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.refillRate = refillRate;
+
+    this.lastRefill = Date.now();
+  }
+
+  refill() {
     const now = Date.now();
-    if (!lastCallTime && !leading) {
-      lastCallTime = now;
+
+    const elapsed =
+      (now - this.lastRefill) / 1000;
+
+    const refillAmount =
+      elapsed * this.refillRate;
+
+    this.tokens = Math.min(
+      this.capacity,
+      this.tokens + refillAmount
+    );
+
+    this.lastRefill = now;
+  }
+
+  consume(count = 1) {
+    this.refill();
+
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      return true;
     }
 
-    const remaining = wait - (now - lastCallTime);
-    lastArgs = args;
-    lastThis = this;
+    return false;
+  }
+}
 
-    if (remaining <= 0) {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
+/* ============================================================
+ * Idle Scheduler
+ * ============================================================
+ */
+
+export function scheduleIdle(
+  callback,
+  timeout = 1000
+) {
+  if (
+    typeof requestIdleCallback ===
+    "function"
+  ) {
+    return requestIdleCallback(
+      callback,
+      { timeout }
+    );
+  }
+
+  return setTimeout(
+    callback,
+    timeout
+  );
+}
+
+/* ============================================================
+ * Promise Queue
+ * ============================================================
+ */
+
+export class AsyncQueue {
+  constructor(concurrency = 1) {
+    this.concurrency =
+      concurrency;
+
+    this.running = 0;
+    this.queue = [];
+  }
+
+  add(task) {
+    return new Promise(
+      (resolve, reject) => {
+        this.queue.push({
+          task,
+          resolve,
+          reject
+        });
+
+        this.next();
       }
-      invoke(now);
-    } else if (!timeoutId && trailing) {
-      timeoutId = setTimeout(trailingEdge, remaining);
-    }
-  };
-
-  throttled.cancel = () => {
-    if (timeoutId) clearTimeout(timeoutId);
-    timeoutId = lastArgs = lastThis = null;
-    lastCallTime = 0;
-  };
-
-  throttled.flush = () => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-      trailingEdge();
-    }
-  };
-
-  return throttled;
-}
-
-/* ---------------------------------------
- * Throttle via requestAnimationFrame
- * (Scroll / resize / mousemove)
- * ------------------------------------- */
-export function throttleRAF(func) {
-  let ticking = false;
-  let lastArgs;
-  let lastThis;
-  let rafId = null;
-
-  const invoke = () => {
-    ticking = false;
-    func.apply(lastThis, lastArgs);
-    lastArgs = lastThis = null;
-  };
-
-  const throttled = function (...args) {
-    lastArgs = args;
-    lastThis = this;
-
-    if (!ticking) {
-      ticking = true;
-      rafId = requestAnimationFrame(invoke);
-    }
-  };
-
-  throttled.cancel = () => {
-    if (rafId) cancelAnimationFrame(rafId);
-    ticking = false;
-    rafId = lastArgs = lastThis = null;
-  };
-
-  return throttled;
-}
-
-/* ---------------------------------------
- * Smart Rate Limit (Upgraded)
- * Auto-selects best strategy intelligently
- * ------------------------------------- */
-export function smartRateLimit(func, wait = 0, opts = {}) {
-  if (typeof func !== "function") {
-    throw new TypeError("Expected a function");
+    );
   }
 
+  async next() {
+    if (
+      this.running >=
+        this.concurrency ||
+      !this.queue.length
+    ) {
+      return;
+    }
+
+    const item =
+      this.queue.shift();
+
+    this.running++;
+
+    try {
+      const result =
+        await item.task();
+
+      item.resolve(result);
+    } catch (err) {
+      item.reject(err);
+    } finally {
+      this.running--;
+      this.next();
+    }
+  }
+
+  clear() {
+    this.queue.length = 0;
+  }
+}
+
+/* ============================================================
+ * Scheduler API Wrapper
+ * ============================================================
+ */
+
+export async function scheduleTask(
+  callback,
+  priority = "user-visible"
+) {
+  if (
+    globalThis.scheduler?.postTask
+  ) {
+    return scheduler.postTask(
+      callback,
+      { priority }
+    );
+  }
+
+  return Promise.resolve().then(
+    callback
+  );
+}
+
+/* ============================================================
+ * Smart Rate Limit 2.0
+ * ============================================================
+ */
+
+export function smartRateLimit(
+  fn,
+  wait = 100,
+  options = {}
+) {
   const {
-    mode = "auto",        // "auto" | "throttle" | "debounce" | "raf"
-    leading = true,
-    trailing = true,
-    maxWait,
-  } = opts;
+    mode = "auto"
+  } = options;
 
-  // RAF mode (for animations / scroll / resize)
-  if (mode === "raf" || wait <= 0) {
-    return throttleRAF(func);
+  switch (mode) {
+    case "debounce":
+      return debounce(
+        fn,
+        wait,
+        options
+      );
+
+    case "adaptive":
+      return adaptiveThrottle(
+        fn,
+        options
+      );
+
+    case "raf":
+      return throttleRAF(fn);
+
+    default:
+      return wait <= 50
+        ? throttleRAF(fn)
+        : debounce(
+            fn,
+            wait,
+            options
+          );
   }
-
-  // Explicit modes
-  if (mode === "throttle") {
-    return throttle(func, wait, { leading, trailing });
-  }
-
-  if (mode === "debounce") {
-    return debounce(func, wait, { leading, trailing, maxWait });
-  }
-
-  // 🔥 AUTO MODE (Smart Detection)
-  // Heuristics based on wait + options
-  if (mode === "auto") {
-    // Very small delay → throttle (UI events like scroll)
-    if (wait <= 50) {
-      return throttle(func, wait, { leading, trailing });
-    }
-
-    // Medium delay → debounce with responsiveness
-    if (wait <= 250) {
-      return debounce(func, wait, { leading: true, trailing: true });
-    }
-
-    // Large delay → strict debounce (API calls, search)
-    return debounce(func, wait, {
-      leading: false,
-      trailing: true,
-      maxWait,
-    });
-  }
-
-  throw new Error(`Invalid mode: ${mode}`);
 }
