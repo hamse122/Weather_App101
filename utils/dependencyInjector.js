@@ -123,16 +123,50 @@ class DependencyInjector {
             return instance;
         }
 
-        // SCOPED
-        if (provider.lifetime === "scoped") {
-            if (this.scopedCache.has(name)) {
-                return this.scopedCache.get(name);
-            }
+// SCOPED
+if (provider.lifetime === "scoped") {
 
-            const instance = await this.instantiate(provider, [...stack, name]);
+    const cached = this.scopedCache.get(name);
+
+    // Return existing instance or pending Promise
+    if (cached) {
+        return cached;
+    }
+
+    // Cache the Promise immediately to prevent duplicate creation
+    const promise = this.instantiate(provider, [...stack, name])
+        .then(instance => {
+            // Replace Promise with the resolved instance
             this.scopedCache.set(name, instance);
+
+            // Optional metrics
+            this.metrics?.scopedResolutions++;
+
+            // Optional event
+            this.emit?.("resolve:scoped", {
+                name,
+                instance
+            });
+
             return instance;
-        }
+        })
+        .catch(err => {
+            // Remove failed Promise from cache
+            this.scopedCache.delete(name);
+
+            this.emit?.("resolve:error", {
+                name,
+                error: err
+            });
+
+            throw err;
+        });
+
+    // Store pending Promise
+    this.scopedCache.set(name, promise);
+
+    return promise;
+}
 
         // TRANSIENT
         return this.instantiate(provider, [...stack, name]);
