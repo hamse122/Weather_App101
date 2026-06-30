@@ -172,27 +172,94 @@ class WorkerPool {
         this.idleWorkers = this.idleWorkers.filter(w => w !== worker);
     }
 
-    /* ==============================
-       Shutdown
-    ============================== */
+/* ==============================
+   Shutdown (Enterprise)
+============================== */
 
-    async drain() {
-        while (this.queue.length || this.activeTasks.size) {
-            await new Promise(r => setTimeout(r, 50));
+async drain(timeout = 0) {
+    const start = Date.now();
+
+    while (this.queue.length || this.activeTasks.size) {
+
+        if (
+            timeout > 0 &&
+            Date.now() - start >= timeout
+        ) {
+            throw new Error("WorkerPool drain timeout");
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+}
+
+async terminate(options = {}) {
+
+    if (this.closing) return;
+
+    const {
+        graceful = true,
+        timeout = 30000,
+        cancelQueued = true,
+        cancelRunning = false
+    } = options;
+
+    this.closing = true;
+
+    // Reject queued tasks
+    if (cancelQueued) {
+        while (this.queue.length) {
+            const task = this.queue.shift();
+
+            task.signal?.removeEventListener(
+                "abort",
+                task.abortHandler
+            );
+
+            task.reject(
+                new Error("WorkerPool terminated")
+            );
         }
     }
 
-    async terminate() {
-        this.closing = true;
-        await this.drain();
+    // Cancel active tasks
+    if (cancelRunning) {
 
-        await Promise.all([...this.workers].map(w => w.terminate()));
+        for (const [id, task] of this.activeTasks) {
 
-        this.workers.clear();
-        this.idleWorkers.length = 0;
-        this.queue.length = 0;
+            clearTimeout(task.timeout);
+
+            task.signal?.removeEventListener(
+                "abort",
+                task.abortHandler
+            );
+
+            task.reject(
+                new Error("WorkerPool terminated")
+            );
+        }
+
         this.activeTasks.clear();
     }
+    else if (graceful) {
+        await this.drain(timeout);
+    }
+
+    // Terminate workers
+    await Promise.allSettled(
+        [...this.workers].map(async worker => {
+
+            worker.removeAllListeners();
+
+            try {
+                await worker.terminate();
+            } catch {}
+        })
+    );
+
+    this.workers.clear();
+    this.idleWorkers.length = 0;
+    this.queue.length = 0;
+    this.activeTasks.clear();
 }
 
 module.exports = WorkerPool;
