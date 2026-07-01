@@ -64,22 +64,98 @@ function safeParse(value) {
 }
 
 /**
- * Optional compression (lightweight)
+ * ==================================================
+ * Lightweight Serialization + Base64 Encoding
+ * Browser + Node.js Compatible
+ * ==================================================
  */
-function compress(data) {
-  try {
-    return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-  } catch {
-    return JSON.stringify(data);
-  }
+
+const isNode =
+    typeof process !== "undefined" &&
+    process.versions?.node;
+
+function compress(data, { urlSafe = false } = {}) {
+    try {
+        const json = JSON.stringify(data);
+
+        let encoded;
+
+        if (isNode) {
+            encoded = Buffer.from(json, "utf8").toString("base64");
+        } else {
+            const bytes = new TextEncoder().encode(json);
+
+            let binary = "";
+            for (const byte of bytes) {
+                binary += String.fromCharCode(byte);
+            }
+
+            encoded = btoa(binary);
+        }
+
+        if (urlSafe) {
+            encoded = encoded
+                .replace(/\+/g, "-")
+                .replace(/\//g, "_")
+                .replace(/=+$/, "");
+        }
+
+        return encoded;
+
+    } catch (err) {
+        console.error("[compress]", err);
+        return JSON.stringify(data);
+    }
 }
 
-function decompress(data) {
-  try {
-    return JSON.parse(decodeURIComponent(escape(atob(data))));
-  } catch {
-    return safeParse(data);
-  }
+function decompress(data, { urlSafe = false } = {}) {
+
+    if (typeof data !== "string") {
+        throw new TypeError("Compressed data must be a string");
+    }
+
+    try {
+
+        let input = data;
+
+        if (urlSafe) {
+            input = input
+                .replace(/-/g, "+")
+                .replace(/_/g, "/");
+
+            while (input.length % 4) {
+                input += "=";
+            }
+        }
+
+        let json;
+
+        if (isNode) {
+
+            json = Buffer
+                .from(input, "base64")
+                .toString("utf8");
+
+        } else {
+
+            const binary = atob(input);
+
+            const bytes = Uint8Array.from(
+                binary,
+                c => c.charCodeAt(0)
+            );
+
+            json = new TextDecoder().decode(bytes);
+        }
+
+        return JSON.parse(json);
+
+    } catch (err) {
+
+        console.warn("[decompress] Falling back:", err.message);
+
+        return safeParse(data);
+    }
 }
 
 /**
