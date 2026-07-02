@@ -321,16 +321,47 @@ export function clear() {
 }
 
 /**
- * Get storage usage (approx bytes)
+ * ==================================================
+ * Storage Usage Statistics
+ * ==================================================
  */
-export function getStorageSize() {
-  let total = 0;
-  for (let i = 0; i < storage.length; i++) {
-    const key = storage.key(i);
-    const value = storage.getItem(key);
-    total += (key?.length || 0) + (value?.length || 0);
-  }
-  return total;
+
+export function getStorageSize(storageRef = storage) {
+    if (
+        !storageRef ||
+        typeof storageRef.length !== "number"
+    ) {
+        throw new TypeError("Invalid Storage object.");
+    }
+
+    const encoder = new TextEncoder();
+
+    let bytes = 0;
+    let items = 0;
+
+    for (let i = 0; i < storageRef.length; i++) {
+        try {
+            const key = storageRef.key(i);
+            if (key == null) continue;
+
+            const value = storageRef.getItem(key) ?? "";
+
+            bytes += encoder.encode(key).length;
+            bytes += encoder.encode(value).length;
+
+            items++;
+
+        } catch {
+            // Ignore inaccessible entries
+        }
+    }
+
+    return Object.freeze({
+        items,
+        bytes,
+        kilobytes: +(bytes / 1024).toFixed(2),
+        megabytes: +(bytes / (1024 * 1024)).toFixed(2)
+    });
 }
 
 /**
