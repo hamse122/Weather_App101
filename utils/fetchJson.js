@@ -13,30 +13,120 @@ class FetchError extends Error {
 }
 
 /* --------------------------------
-   Helpers
+   Helpers (Enterprise)
 -------------------------------- */
 
-function buildUrl(url, params) {
-  if (!params) return url;
-
-  const u = new URL(url);
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null) {
-      u.searchParams.append(k, v);
+function buildUrl(url, params = {}, options = {}) {
+    if (!params || Object.keys(params).length === 0) {
+        return url;
     }
-  });
 
-  return u.toString();
+    const {
+        base,
+        arrayFormat = "repeat" // repeat | comma
+    } = options;
+
+    const u = new URL(url, base);
+
+    for (const [key, value] of Object.entries(params)) {
+
+        if (value == null) continue;
+
+        // Arrays
+        if (Array.isArray(value)) {
+
+            if (arrayFormat === "comma") {
+                u.searchParams.set(key, value.join(","));
+            } else {
+                for (const item of value) {
+                    if (item != null) {
+                        u.searchParams.append(key, String(item));
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        // Dates
+        if (value instanceof Date) {
+            u.searchParams.set(key, value.toISOString());
+            continue;
+        }
+
+        // Objects
+        if (typeof value === "object") {
+            u.searchParams.set(key, JSON.stringify(value));
+            continue;
+        }
+
+        u.searchParams.set(key, String(value));
+    }
+
+    return u.toString();
 }
 
-async function parseBody(res) {
-  const contentType = res.headers?.get?.("content-type") || "";
+async function parseBody(response, { throwOnError = false } = {}) {
 
-  if (contentType.includes("application/json")) {
-    return res.json();
-  }
+    const contentType =
+        response.headers?.get("content-type")?.toLowerCase() || "";
 
-  return res.text();
+    let body = null;
+
+    try {
+
+        // No Content
+        if (
+            response.status === 204 ||
+            response.status === 205
+        ) {
+            body = null;
+        }
+
+        else if (contentType.includes("application/json")) {
+            body = await response.json();
+        }
+
+        else if (
+            contentType.startsWith("text/") ||
+            contentType.includes("xml") ||
+            contentType.includes("html")
+        ) {
+            body = await response.text();
+        }
+
+        else if (contentType.includes("form-data")) {
+            body = await response.formData();
+        }
+
+        else if (
+            contentType.includes("application/octet-stream")
+        ) {
+            body = await response.arrayBuffer();
+        }
+
+        else {
+            body = await response.blob();
+        }
+
+    } catch {
+        body = null;
+    }
+
+    if (throwOnError && !response.ok) {
+        const error = new Error(
+            `HTTP ${response.status} ${response.statusText}`
+        );
+
+        error.status = response.status;
+        error.statusText = response.statusText;
+        error.body = body;
+        error.response = response;
+
+        throw error;
+    }
+
+    return body;
 }
 
 /* --------------------------------
