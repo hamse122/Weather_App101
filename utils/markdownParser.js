@@ -97,60 +97,98 @@ export class MarkdownParser {
         return tokens;
     }
 
-    // ==========================
-    // RENDER HTML
-    // ==========================
-    static #renderHTML(tokens) {
-        let html = "";
-        let listOpen = null;
+// ==========================
+// RENDER HTML (v3)
+// ==========================
+static #renderHTML(tokens) {
+    let html = "";
+    let listOpen = null;
 
-        for (const t of tokens) {
-            if (listOpen && t.type !== listOpen) {
-                html += `</${listOpen}>`;
-                listOpen = null;
-            }
+    const closeList = () => {
+        if (listOpen) {
+            html += `</${listOpen}>`;
+            listOpen = null;
+        }
+    };
 
-            switch (t.type) {
-                case "heading":
-                    html += `<h${t.level}>${this.#inline(t.text)}</h${t.level}>`;
-                    break;
+    for (const t of tokens) {
 
-                case "paragraph":
-                    html += `<p>${this.#inline(t.text)}</p>`;
-                    break;
-
-                case "quote":
-                    html += `<blockquote>${this.#inline(t.text)}</blockquote>`;
-                    break;
-
-                case "ul":
-                    if (!listOpen) {
-                        html += "<ul>";
-                        listOpen = "ul";
-                    }
-                    html += `<li>${this.#inline(t.text)}</li>`;
-                    break;
-
-                case "ol":
-                    if (!listOpen) {
-                        html += "<ol>";
-                        listOpen = "ol";
-                    }
-                    html += `<li>${this.#inline(t.text)}</li>`;
-                    break;
-
-                case "code":
-                    html += `<pre><code>${this.#escape(t.content)}</code></pre>`;
-                    break;
-
-                case "hr":
-                    html += "<hr/>";
-            }
+        // Close list if current token isn't a list
+        if (listOpen && !["ul", "ol"].includes(t.type)) {
+            closeList();
         }
 
-        if (listOpen) html += `</${listOpen}>`;
-        return html;
+        switch (t.type) {
+
+            case "heading": {
+                const id = t.text
+                    .toLowerCase()
+                    .trim()
+                    .replace(/[^\w\s-]/g, "")
+                    .replace(/\s+/g, "-");
+
+                html += `<h${t.level} id="${id}">${this.#inline(t.text)}</h${t.level}>`;
+                break;
+            }
+
+            case "paragraph":
+                html += `<p>${this.#inline(t.text)}</p>`;
+                break;
+
+            case "quote":
+                html += `<blockquote>${this.#inline(t.text)}</blockquote>`;
+                break;
+
+            case "ul":
+            case "ol": {
+
+                if (listOpen !== t.type) {
+                    closeList();
+                    html += `<${t.type}>`;
+                    listOpen = t.type;
+                }
+
+                // Task list support
+                const task = t.text.match(/^\[( |x|X)\]\s+(.*)$/);
+
+                if (task) {
+                    const checked = task[1].toLowerCase() === "x";
+
+                    html += `
+<li class="task-list-item">
+<input type="checkbox" disabled ${checked ? "checked" : ""}>
+${this.#inline(task[2])}
+</li>`;
+                } else {
+                    html += `<li>${this.#inline(t.text)}</li>`;
+                }
+
+                break;
+            }
+
+            case "code": {
+                const lang = t.language
+                    ? ` class="language-${this.#escape(t.language)}"`
+                    : "";
+
+                html += `<pre><code${lang}>${this.#escape(t.content)}</code></pre>`;
+                break;
+            }
+
+            case "hr":
+                html += "<hr/>";
+                break;
+
+            default:
+                // Ignore unknown token types
+                break;
+        }
     }
+
+    closeList();
+
+    return html;
+}
 
     // ==========================
     // INLINE PARSER
