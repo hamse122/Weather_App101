@@ -1,14 +1,14 @@
-// Advanced Priority Queue System
-
-const EventEmitter = require('events');
+const EventEmitter = require("events");
+const { randomUUID } = require("crypto");
 
 class QueueSystem extends EventEmitter {
     constructor({
         concurrency = 1,
         maxRetries = 3,
         retryDelay = 500,
-        timeout = 0, // 0 = no timeout
-        agingInterval = 5000
+        timeout = 0,
+        agingInterval = 5000,
+        retryJitter = true
     } = {}) {
         super();
 
@@ -18,152 +18,281 @@ class QueueSystem extends EventEmitter {
             low: []
         };
 
+        this.deadLetterQueue = [];
+
         this.concurrency = concurrency;
         this.maxRetries = maxRetries;
         this.retryDelay = retryDelay;
+        this.retryJitter = retryJitter;
         this.timeout = timeout;
 
         this.activeCount = 0;
         this.paused = false;
         this.stopped = false;
 
-        this._startAging(agingInterval);
+        this.metrics = {
+            completed: 0,
+            failed: 0,
+            retries: 0,
+            cancelled: 0
+        };
+
+        this._agingTimer = this._startAging(agingInterval);
     }
 
-    enqueue(task, priority = 'normal') {
-        if (this.stopped) throw new Error('Queue is stopped');
-        if (!this.queues[priority]) priority = 'normal';
+    /* ================================================= */
 
-        this.queues[priority].push({
+    enqueue(task, priority = "normal", options = {}) {
+        if (this.stopped) throw new Error("Queue is stopped");
+
+        if (!this.queues[priority]) {
+            priority = "normal";
+        }
+
+        const id = randomUUID();
+
+        const item = {
+            id,
             task,
             priority,
             retries: 0,
             enqueuedAt: Date.now(),
-            cancelled: false
-        });
+            cancelled: false,
+            signal: options.signal || null,
+            delay: options.delay || 0
+        };
 
-        this.emit('enqueue', task, priority);
+        if (item.signal?.aborted) {
+            item.cancelled = true;
+        }
+
+        item.signal?.addEventListener(
+            "abort",
+            () => this.cancel(id),
+            { once: true }
+        );
+
+        this.queues[priority].push(item);
+
+        this.emit("enqueue", item);
+
         this._process();
+
+        return id;
     }
 
-    cancel(task) {
+    cancel(id) {
         for (const queue of Object.values(this.queues)) {
-            const item = queue.find(i => i.task === task);
-            if (item) item.cancelled = true;
+            const item = queue.find(i => i.id === id);
+
+            if (item) {
+                item.cancelled = true;
+                this.metrics.cancelled++;
+                this.emit("cancel", item);
+                return true;
+            }
         }
+
+        return false;
     }
 
     pause() {
         this.paused = true;
-        this.emit('pause');
+        this.emit("pause");
     }
 
     resume() {
         this.paused = false;
-        this.emit('resume');
+        this.emit("resume");
         this._process();
     }
 
     stop() {
         this.stopped = true;
-        this.emit('stop');
+        this.emit("stop");
+    }
+
+    destroy() {
+        this.stop();
+
+        if (this._agingTimer) {
+            clearInterval(this._agingTimer);
+        }
+
+        this.removeAllListeners();
     }
 
     getQueueLength(priority = null) {
-        if (priority) return this.queues[priority]?.length || 0;
-        return Object.values(this.queues).reduce((s, q) => s + q.length, 0);
+        if (priority) {
+            return this.queues[priority]?.length || 0;
+        }
+
+        return Object.values(this.queues)
+            .reduce((n, q) => n + q.length, 0);
     }
+
+    getStats() {
+        return {
+            queued: this.getQueueLength(),
+            running: this.activeCount,
+            ...this.metrics,
+            deadLetters: this.deadLetterQueue.length
+        };
+    }
+
+    /* ================================================= */
 
     async _process() {
         if (this.paused || this.stopped) return;
 
-        while (this.activeCount < this.concurrency && this._hasItems()) {
+        while (
+            this.activeCount < this.concurrency &&
+            this._hasItems()
+        ) {
             const item = this._dequeue();
-            if (!item) return;
+
+            if (!item) break;
 
             this.activeCount++;
-            this._runItem(item).finally(() => {
-                this.activeCount--;
-                this._process();
-            });
+
+            this._runItem(item)
+                .finally(() => {
+                    this.activeCount--;
+
+                    if (
+                        this.activeCount === 0 &&
+                        !this._hasItems()
+                    ) {
+                        this.emit("idle");
+                        this.emit("drain");
+                    }
+
+                    this._process();
+                });
         }
     }
 
     async _runItem(item) {
         if (item.cancelled) return;
 
-        try {
-            this.emit('start', item.task);
+        if (item.delay > 0) {
+            await this._delay(item.delay);
+        }
 
-            const execution = item.task.process();
+        try {
+            this.emit("start", item);
+
+            const execution = Promise.resolve(item.task.process());
 
             if (this.timeout > 0) {
                 await Promise.race([
                     execution,
                     new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Timeout')), this.timeout)
+                        setTimeout(
+                            () => reject(new Error("Timeout")),
+                            this.timeout
+                        )
                     )
                 ]);
             } else {
                 await execution;
             }
 
-            this.emit('success', item.task);
-        } catch (err) {
-            if (item.retries < this.maxRetries && !item.cancelled) {
-                item.retries++;
-                this.emit('retry', item.task, item.retries);
+            this.metrics.completed++;
+            this.emit("success", item);
 
-                await this._delay(this.retryDelay * item.retries);
+        } catch (err) {
+
+            if (
+                item.retries < this.maxRetries &&
+                !item.cancelled
+            ) {
+
+                item.retries++;
+                this.metrics.retries++;
+
+                this.emit("retry", item, item.retries);
+
+                let delay =
+                    this.retryDelay * (2 ** (item.retries - 1));
+
+                if (this.retryJitter) {
+                    delay += Math.random() * 250;
+                }
+
+                await this._delay(delay);
+
                 this.queues[item.priority].push(item);
+
             } else {
-                this.emit('failure', item.task, err);
+
+                this.metrics.failed++;
+
+                this.deadLetterQueue.push(item);
+
+                this.emit("failure", item, err);
             }
         }
     }
 
     _dequeue() {
-        for (const p of ['high', 'normal', 'low']) {
-            if (this.queues[p].length > 0) {
-                return this.queues[p].shift();
+        for (const level of ["high", "normal", "low"]) {
+            if (this.queues[level].length) {
+                return this.queues[level].shift();
             }
         }
         return null;
     }
 
     _hasItems() {
-        return Object.values(this.queues).some(q => q.length > 0);
+        return Object.values(this.queues)
+            .some(q => q.length);
     }
 
     _startAging(interval) {
-        if (!interval) return;
+        if (!interval) return null;
 
-        setInterval(() => {
+        return setInterval(() => {
+
             const now = Date.now();
 
-            // Promote long-waiting tasks
-            if (this.queues.low.length > 0) {
+            if (this.queues.low.length) {
+
                 const item = this.queues.low[0];
-                if (now - item.enqueuedAt > interval) {
+
+                if (now - item.enqueuedAt >= interval) {
+
                     this.queues.low.shift();
-                    item.priority = 'normal';
+
+                    item.priority = "normal";
+
                     this.queues.normal.push(item);
+
+                    this.emit("promote", item);
                 }
             }
 
-            if (this.queues.normal.length > 0) {
+            if (this.queues.normal.length) {
+
                 const item = this.queues.normal[0];
-                if (now - item.enqueuedAt > interval * 2) {
+
+                if (now - item.enqueuedAt >= interval * 2) {
+
                     this.queues.normal.shift();
-                    item.priority = 'high';
+
+                    item.priority = "high";
+
                     this.queues.high.push(item);
+
+                    this.emit("promote", item);
                 }
             }
+
         }, interval);
     }
 
     _delay(ms) {
-        return new Promise(res => setTimeout(res, ms));
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
 
