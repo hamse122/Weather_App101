@@ -17,93 +17,179 @@ class URLShortener {
         this.startAutoCleanup();
     }
 
-    /* -------------------------
-       INTERNAL UTILITIES
-    ------------------------- */
+/* -------------------------
+   INTERNAL UTILITIES (v3)
+------------------------- */
 
-    validateUrl(longUrl) {
-        try {
-            const parsed = new URL(longUrl);
-            if (!["http:", "https:"].includes(parsed.protocol)) {
-                throw new Error("Only HTTP/HTTPS URLs are allowed");
+validateUrl(longUrl) {
+    try {
+        const url = new URL(longUrl.trim());
+
+        if (!["http:", "https:"].includes(url.protocol)) {
+            throw new Error("Only HTTP/HTTPS URLs are allowed");
+        }
+
+        const host = url.hostname.toLowerCase();
+
+        // Optional security checks
+        if (this.allowPrivate !== true) {
+            if (
+                host === "localhost" ||
+                host === "::1" ||
+                /^127\./.test(host) ||
+                /^10\./.test(host) ||
+                /^192\.168\./.test(host) ||
+                /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+            ) {
+                throw new Error("Private/local addresses are not allowed");
             }
-            return parsed.toString();
-        } catch {
-            throw new Error("Invalid URL format");
+        }
+
+        // Remove URL fragment for consistency
+        url.hash = "";
+
+        return url.toString();
+
+    } catch (err) {
+        throw new Error(err.message || "Invalid URL");
+    }
+}
+
+generateCode(length = this.codeLength) {
+    const chars = this.characters;
+    const charsLength = chars.length;
+
+    let code = "";
+
+    while (code.length < length) {
+        const bytes = crypto.randomBytes(length * 2);
+
+        for (const byte of bytes) {
+
+            // Rejection sampling (avoids modulo bias)
+            const max = 256 - (256 % charsLength);
+
+            if (byte >= max) continue;
+
+            code += chars[byte % charsLength];
+
+            if (code.length === length) break;
         }
     }
 
-    generateCode(length = this.codeLength) {
-        const bytes = crypto.randomBytes(length);
-        let code = "";
+    return code;
+}
 
-        for (let i = 0; i < length; i++) {
-            code += this.characters[bytes[i] % this.characters.length];
+generateHashCode(longUrl) {
+    return crypto
+        .createHash("sha256")
+        .update(longUrl + (this.hashSalt || ""))
+        .digest("base64url")
+        .substring(0, this.codeLength);
+}
+
+ensureCapacity() {
+    if (this.urls.size < this.maxUrls) return;
+
+    let oldestKey = null;
+    let oldestTime = Infinity;
+
+    for (const [key, value] of this.urls) {
+
+        const time =
+            value.lastAccessed?.getTime?.() ??
+            value.createdAt?.getTime?.() ??
+            0;
+
+        if (time < oldestTime) {
+            oldestTime = time;
+            oldestKey = key;
         }
-        return code;
     }
 
-    generateHashCode(longUrl) {
-        return crypto
-            .createHash("sha256")
-            .update(longUrl)
-            .digest("base64url")
-            .slice(0, this.codeLength);
+    if (oldestKey) {
+        const entry = this.urls.get(oldestKey);
+
+        this.urlIndex.delete(entry.longUrl);
+        this.urls.delete(oldestKey);
+    }
+}
+
+checkRateLimit(key = "global") {
+
+    const now = Date.now();
+    const windowMs = this.rateWindow ?? 60000;
+
+    let data = this.requestMap.get(key);
+
+    if (!data || now >= data.resetTime) {
+
+        data = {
+            count: 0,
+            resetTime: now + windowMs
+        };
+
+        this.requestMap.set(key, data);
     }
 
-    ensureCapacity() {
-        if (this.urls.size >= this.maxUrls) {
-            // Remove oldest (simple LRU-like cleanup)
-            const oldestKey = this.urls.keys().next().value;
-            const old = this.urls.get(oldestKey);
-            this.urlIndex.delete(old.longUrl);
-            this.urls.delete(oldestKey);
+    if (++data.count > this.rateLimit) {
+        throw new Error("Rate limit exceeded.");
+    }
+
+    // Cleanup expired entries occasionally
+    if (Math.random() < 0.02) {
+        for (const [k, v] of this.requestMap) {
+            if (now >= v.resetTime) {
+                this.requestMap.delete(k);
+            }
         }
     }
+}
 
-    checkRateLimit(key = "global") {
+startAutoCleanup() {
+
+    if (this._cleanupTimer) {
+        clearInterval(this._cleanupTimer);
+    }
+
+    this._cleanupTimer = setInterval(() => {
+
         const now = Date.now();
-        const windowMs = 60 * 1000;
 
-        if (!this.requestMap.has(key)) {
-            this.requestMap.set(key, { count: 1, resetTime: now + windowMs });
-            return;
-        }
+        for (const [code, data] of this.urls) {
 
-        const data = this.requestMap.get(key);
-
-        if (now > data.resetTime) {
-            data.count = 1;
-            data.resetTime = now + windowMs;
-            return;
-        }
-
-        if (data.count >= this.rateLimit) {
-            throw new Error("Rate limit exceeded. Try again later.");
-        }
-
-        data.count++;
-    }
-
-    startAutoCleanup() {
-        setInterval(() => {
-            const now = new Date();
-            for (const [code, data] of this.urls.entries()) {
-                if (data.expiresAt && now > data.expiresAt) {
-                    this.urlIndex.delete(data.longUrl);
-                    this.urls.delete(code);
-                }
+            if (
+                data.expiresAt &&
+                now >= new Date(data.expiresAt).getTime()
+            ) {
+                this.urlIndex.delete(data.longUrl);
+                this.urls.delete(code);
             }
-        }, this.cleanupInterval).unref();
-    }
-
-    normalizeCode(code) {
-        if (!/^[A-Za-z0-9_-]+$/.test(code)) {
-            throw new Error("Invalid short code format");
         }
-        return code;
+
+    }, this.cleanupInterval);
+
+    this._cleanupTimer.unref?.();
+}
+
+normalizeCode(code) {
+
+    if (typeof code !== "string") {
+        throw new Error("Short code must be a string");
     }
 
+    code = code.trim();
+
+    if (
+        code.length === 0 ||
+        code.length > 128 ||
+        !/^[A-Za-z0-9_-]+$/.test(code)
+    ) {
+        throw new Error("Invalid short code format");
+    }
+
+    return code;
+}
     /* -------------------------
        CORE FEATURES
     ------------------------- */
