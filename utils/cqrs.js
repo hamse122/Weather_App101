@@ -46,19 +46,76 @@ class CQRS {
         return dispatch(0);
     }
 
-    /* -------------------- Hooks -------------------- */
+/* -------------------- Hooks -------------------- */
 
-    registerHook(type, fn) {
-        if (!this.hooks[type]) throw new Error(`Invalid hook: ${type}`);
-        this.hooks[type].push(fn);
-        return this;
+registerHook(type, fn, options = {}) {
+    if (!this.hooks[type]) {
+        throw new Error(`Invalid hook: ${type}`);
     }
 
-    async runHooks(type, data, context) {
-        for (const hook of this.hooks[type]) {
-            await hook(data, context);
+    if (typeof fn !== "function") {
+        throw new TypeError("Hook must be a function");
+    }
+
+    const hook = {
+        id: options.id ?? crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        fn,
+        priority: options.priority ?? 0,
+        once: !!options.once,
+        enabled: options.enabled !== false
+    };
+
+    this.hooks[type].push(hook);
+
+    // Highest priority runs first
+    this.hooks[type].sort((a, b) => b.priority - a.priority);
+
+    return hook.id;
+}
+
+async runHooks(type, data, context = {}) {
+    const hooks = this.hooks[type];
+
+    if (!hooks?.length) {
+        return;
+    }
+
+    const remove = [];
+
+    for (const hook of hooks) {
+
+        if (!hook.enabled) continue;
+
+        try {
+            await Promise.resolve(
+                hook.fn(data, context)
+            );
+
+            if (hook.once) {
+                remove.push(hook.id);
+            }
+
+        } catch (err) {
+
+            if (context?.continueOnError !== true) {
+                throw err;
+            }
+
+            context.errors ??= [];
+            context.errors.push({
+                hook: hook.id,
+                error: err
+            });
         }
     }
+
+    // Remove one-time hooks
+    if (remove.length) {
+        this.hooks[type] = hooks.filter(
+            h => !remove.includes(h.id)
+        );
+    }
+}
 
     /* -------------------- Commands -------------------- */
 
