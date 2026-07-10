@@ -12,30 +12,83 @@ class FeatureManager {
         this.killed = false;
     }
 
-    /* ============================
-       Utilities
-    ============================ */
+/* ============================
+   Utilities
+============================ */
 
-    _clone(obj) {
+_clone(obj) {
+    if (obj == null) return obj;
+
+    // Modern browsers / Node.js 17+
+    if (typeof structuredClone === "function") {
+        try {
+            return structuredClone(obj);
+        } catch {
+            // Fall through
+        }
+    }
+
+    // Fallback for plain JSON objects
+    try {
         return JSON.parse(JSON.stringify(obj));
-    }
-
-    _hash(key) {
-        return murmurhash.v3(String(key));
-    }
-
-    async _persist(key, value) {
-        if (this.storage?.set) {
-            await this.storage.set(key, value);
+    } catch {
+        // Last resort (shallow copy)
+        if (Array.isArray(obj)) {
+            return [...obj];
         }
+
+        if (typeof obj === "object") {
+            return { ...obj };
+        }
+
+        return obj;
+    }
+}
+
+_hash(key) {
+    const input =
+        typeof key === "string"
+            ? key
+            : JSON.stringify(
+                  key,
+                  Object.keys(key || {}).sort()
+              );
+
+    return murmurhash.v3(input);
+}
+
+async _persist(key, value, options = {}) {
+    if (typeof this.storage?.set !== "function") {
+        return false;
     }
 
-    async _load(key) {
-        if (this.storage?.get) {
-            return this.storage.get(key);
+    try {
+        if (value == null && typeof this.storage.delete === "function") {
+            await this.storage.delete(key);
+            return true;
         }
-        return null;
+
+        await this.storage.set(key, value, options);
+        return true;
+    } catch (err) {
+        this.logger?.error?.("Persist failed:", err);
+        return false;
     }
+}
+
+async _load(key, defaultValue = null) {
+    if (typeof this.storage?.get !== "function") {
+        return defaultValue;
+    }
+
+    try {
+        const value = await this.storage.get(key);
+        return value ?? defaultValue;
+    } catch (err) {
+        this.logger?.error?.("Load failed:", err);
+        return defaultValue;
+    }
+}
 
     /* ============================
        Segments
