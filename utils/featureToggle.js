@@ -28,28 +28,76 @@ export class FeatureToggle {
         this.metrics = new Map();
     }
 
-    /* ==================================================
-       MIDDLEWARE PIPELINE
-    ================================================== */
+/* ==================================================
+   MIDDLEWARE PIPELINE (v2)
+================================================== */
 
-    use(fn) {
-        this.middlewares.push(fn);
+use(fn, options = {}) {
+    if (typeof fn !== "function") {
+        throw new TypeError("Middleware must be a function");
     }
 
-    runMiddleware(context, result) {
-        let res = result;
+    this.middlewares.push({
+        fn,
+        priority: options.priority ?? 0,
+        enabled: options.enabled !== false,
+        once: !!options.once
+    });
 
-        for (const mw of this.middlewares) {
-            try {
-                res = mw(context, res) || res;
-            } catch (e) {
-                console.error("[FeatureToggle middleware]", e);
+    // Higher priority executes first
+    this.middlewares.sort(
+        (a, b) => b.priority - a.priority
+    );
+
+    return this;
+}
+
+async runMiddleware(context, result) {
+    let res = result;
+    const remove = [];
+
+    for (const middleware of this.middlewares) {
+
+        if (!middleware.enabled) continue;
+
+        try {
+            const output = await middleware.fn(
+                context,
+                res
+            );
+
+            if (output !== undefined) {
+                res = output;
+            }
+
+            if (middleware.once) {
+                remove.push(middleware);
+            }
+
+        } catch (e) {
+            console.error(
+                "[FeatureToggle middleware]",
+                e
+            );
+
+            context.middlewareErrors ??= [];
+            context.middlewareErrors.push(e);
+
+            if (context.stopOnMiddlewareError) {
+                throw e;
             }
         }
-
-        return res;
     }
 
+    // Remove one-time middleware
+    if (remove.length) {
+        this.middlewares = this.middlewares.filter(
+            mw => !remove.includes(mw)
+        );
+    }
+
+    return res;
+}
     /* ==================================================
        SEGMENTS
     ================================================== */
