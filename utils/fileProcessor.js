@@ -150,31 +150,101 @@ class FileProcessor {
         return `${bytes.toFixed(2)} ${units[i]}`;
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                               SAFE WRITE                                    */
-    /* -------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/*                               SAFE WRITE (v2)                              */
+/* -------------------------------------------------------------------------- */
 
-    static async writeTextAtomic(filePath, data) {
-        filePath = this._validatePath(filePath);
+static async writeTextAtomic(filePath, data, options = {}) {
+    filePath = this._validatePath(filePath);
 
-        await this.ensureDirectory(path.dirname(filePath));
+    const {
+        encoding = "utf8",
+        mode = 0o666,
+        fsync = true
+    } = options;
 
-        const temp = `${filePath}.${crypto.randomUUID()}.tmp`;
+    await this.ensureDirectory(path.dirname(filePath));
 
-        await this._retry(() => fs.writeFile(temp, data, "utf8"));
+    const temp = path.join(
+        path.dirname(filePath),
+        `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`
+    );
+
+    let handle;
+
+    try {
+        handle = await fs.open(temp, "w", mode);
+
+        await this._retry(() =>
+            handle.writeFile(
+                typeof data === "string" || Buffer.isBuffer(data)
+                    ? data
+                    : String(data),
+                encoding
+            )
+        );
+
+        if (fsync) {
+            await handle.sync();
+        }
+
+        await handle.close();
+
         await fs.rename(temp, filePath);
 
         this._log(`Written atomically: ${filePath}`);
-    }
 
-    static async writeJSON(filePath, obj) {
-        return this.writeTextAtomic(filePath, JSON.stringify(obj, null, 2));
-    }
+        return true;
 
-    static async readJSON(filePath) {
-        filePath = this._validatePath(filePath);
-        return JSON.parse(await fs.readFile(filePath, "utf8"));
+    } catch (err) {
+
+        try {
+            await handle?.close();
+        } catch {}
+
+        try {
+            await fs.unlink(temp);
+        } catch {}
+
+        throw err;
     }
+}
+
+static async writeJSON(filePath, obj, options = {}) {
+    return this.writeTextAtomic(
+        filePath,
+        JSON.stringify(obj, null, options.indent ?? 2),
+        options
+    );
+}
+
+static async readJSON(filePath, options = {}) {
+    filePath = this._validatePath(filePath);
+
+    try {
+        const text = await fs.readFile(
+            filePath,
+            options.encoding ?? "utf8"
+        );
+
+        return JSON.parse(text);
+
+    } catch (err) {
+
+        if (
+            err.code === "ENOENT" &&
+            "defaultValue" in options
+        ) {
+            return typeof options.defaultValue === "function"
+                ? options.defaultValue()
+                : options.defaultValue;
+        }
+
+        throw new Error(
+            `Failed to read JSON '${filePath}': ${err.message}`
+        );
+    }
+}
 
     /* -------------------------------------------------------------------------- */
     /*                               COPY / MOVE                                   */
