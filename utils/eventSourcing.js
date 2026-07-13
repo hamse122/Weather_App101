@@ -81,21 +81,52 @@ class EventStore {
         return this._getStream(aggregateId).length;
     }
 
-    /* ---------------- SNAPSHOTS ---------------- */
+/* ---------------- SNAPSHOTS (v2) ---------------- */
 
-    saveSnapshot(aggregateId, version, state) {
-        this.snapshots.set(aggregateId, {
-            aggregateId,
-            version,
-            state: structuredClone(state),
-            timestamp: this.clock()
-        });
+saveSnapshot(aggregateId, version, state, metadata = {}) {
+    if (!aggregateId) {
+        throw new Error("aggregateId is required");
     }
 
-    getSnapshot(aggregateId) {
-        return this.snapshots.get(aggregateId) ?? null;
+    if (!Number.isInteger(version) || version < 0) {
+        throw new Error("Snapshot version must be a non-negative integer");
     }
 
+    const clone =
+        typeof structuredClone === "function"
+            ? structuredClone(state)
+            : JSON.parse(JSON.stringify(state));
+
+    const snapshot = Object.freeze({
+        aggregateId,
+        version,
+        state: clone,
+        timestamp: this.clock(),
+        metadata: { ...metadata }
+    });
+
+    this.snapshots.set(aggregateId, snapshot);
+
+    return snapshot;
+}
+
+getSnapshot(aggregateId, { clone = true } = {}) {
+    const snapshot = this.snapshots.get(aggregateId);
+    if (!snapshot) return null;
+
+    if (!clone) {
+        return snapshot;
+    }
+
+    return {
+        ...snapshot,
+        state:
+            typeof structuredClone === "function"
+                ? structuredClone(snapshot.state)
+                : JSON.parse(JSON.stringify(snapshot.state)),
+        metadata: { ...snapshot.metadata }
+    };
+}
     /* ---------------- PROJECTIONS ---------------- */
 
     registerProjection(name, projection) {
