@@ -351,20 +351,62 @@ class CacheWarmer {
         return results;
     }
 
-    // Health check
-    healthCheck() {
-        const status = this.getWarmupStatus();
-        const failedStrategies = Object.values(status).filter(s => s.lastError).length;
-        const staleStrategies = Object.values(status).filter(s => s.isStale).length;
-        
-        return {
-            healthy: failedStrategies === 0,
-            strategies: this.warmingStrategies.size,
-            failed: failedStrategies,
-            stale: staleStrategies,
-            warming: this.isWarming
-        };
+// Health check (v2)
+healthCheck(options = {}) {
+    const {
+        includeDetails = false,
+        staleThreshold = 0
+    } = options;
+
+    const status = this.getWarmupStatus();
+    const strategies = Object.values(status);
+
+    const failedStrategies = strategies.filter(
+        s => s.lastError != null
+    );
+
+    const staleStrategies = strategies.filter(s => {
+        if (s.isStale) return true;
+
+        if (
+            staleThreshold > 0 &&
+            s.lastRun &&
+            Date.now() - new Date(s.lastRun).getTime() > staleThreshold
+        ) {
+            return true;
+        }
+
+        return false;
+    });
+
+    const result = {
+        healthy:
+            failedStrategies.length === 0 &&
+            staleStrategies.length === 0,
+
+        timestamp: new Date().toISOString(),
+
+        strategies: this.warmingStrategies.size,
+        active: strategies.length,
+
+        failed: failedStrategies.length,
+        stale: staleStrategies.length,
+
+        warming: this.isWarming,
+
+        uptime:
+            typeof this.startedAt === "number"
+                ? Date.now() - this.startedAt
+                : null
+    };
+
+    if (includeDetails) {
+        result.details = status;
+        result.failedStrategies = failedStrategies.map(s => s.name ?? s.id);
+        result.staleStrategies = staleStrategies.map(s => s.name ?? s.id);
     }
+
+    return Object.freeze(result);
 }
 
 module.exports = CacheWarmer;
