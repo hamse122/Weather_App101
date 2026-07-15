@@ -5,23 +5,62 @@
 
 class CryptoUtils {
 
-    /* ---------------------------------------------------
-     * ENVIRONMENT HELPERS
-     * --------------------------------------------------- */
-    static isBrowser() {
-        return typeof window !== "undefined" && typeof window.crypto !== "undefined";
+/* ---------------------------------------------------
+ * ENVIRONMENT HELPERS (v2)
+ * --------------------------------------------------- */
+
+static isBrowser() {
+    return (
+        typeof window !== "undefined" &&
+        typeof document !== "undefined" &&
+        typeof globalThis?.crypto !== "undefined"
+    );
+}
+
+static isNode() {
+    return (
+        typeof process !== "undefined" &&
+        !!process.versions?.node &&
+        !process.versions?.bun &&
+        !process.versions?.deno
+    );
+}
+
+static isDeno() {
+    return (
+        typeof globalThis.Deno !== "undefined" &&
+        typeof globalThis.Deno.version !== "undefined"
+    );
+}
+
+static isBun() {
+    return (
+        typeof globalThis.Bun !== "undefined"
+    );
+}
+
+static getNodeCrypto() {
+    if (!this.isNode()) return null;
+
+    try {
+        return require("node:crypto"); // Modern Node.js
+    } catch {
+        try {
+            return require("crypto"); // Fallback
+        } catch {
+            return null;
+        }
+    }
+}
+
+static getCrypto() {
+    if (typeof globalThis.crypto !== "undefined") {
+        return globalThis.crypto;
     }
 
-    static isNode() {
-        return typeof process !== "undefined" &&
-               process.release &&
-               process.release.name === "node";
-    }
-
-    static getNodeCrypto() {
-        if (this.isNode()) return require("crypto");
-        return null;
-    }
+    const nodeCrypto = this.getNodeCrypto();
+    return nodeCrypto?.webcrypto ?? nodeCrypto ?? null;
+}
 
 
     /* ---------------------------------------------------
