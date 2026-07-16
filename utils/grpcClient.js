@@ -95,28 +95,79 @@ class GrpcClient {
         }
     }
 
-    // =====================================================
-    // DISCOVERY
-    // =====================================================
+// =====================================================
+// DISCOVERY (v2)
+// =====================================================
 
-    async discoverServices() {
-        if (!this.discovery?.list) return;
+async discoverServices(options = {}) {
+    const {
+        removeMissing = false,
+        validate = true,
+        onDiscovered = null
+    } = options;
 
-        const discovered = await this.discovery.list();
+    if (typeof this.discovery?.list !== "function") {
+        return [];
+    }
 
-        for (const service of discovered) {
-            if (this.services.has(service.name)) {
-                this.services.get(service.name).endpoints =
-                    new Set(service.endpoints);
-            } else {
-                this.registerService(
-                    service.name,
-                    service.definition,
-                    service.endpoints
-                );
+    const discovered = await this.discovery.list();
+
+    if (!Array.isArray(discovered)) {
+        throw new Error("Service discovery must return an array");
+    }
+
+    const activeServices = new Set();
+
+    for (const service of discovered) {
+        if (!service?.name) continue;
+
+        activeServices.add(service.name);
+
+        const endpoints = Array.isArray(service.endpoints)
+            ? [...new Set(service.endpoints.filter(Boolean))]
+            : [];
+
+        if (validate && endpoints.length === 0) {
+            continue;
+        }
+
+        if (this.services.has(service.name)) {
+            const existing = this.services.get(service.name);
+
+            existing.definition = service.definition ?? existing.definition;
+            existing.endpoints = new Set(endpoints);
+            existing.lastDiscovered = Date.now();
+            existing.status = "healthy";
+
+        } else {
+            this.registerService(
+                service.name,
+                service.definition,
+                endpoints
+            );
+
+            const created = this.services.get(service.name);
+            if (created) {
+                created.lastDiscovered = Date.now();
+                created.status = "healthy";
+            }
+        }
+
+        if (typeof onDiscovered === "function") {
+            await onDiscovered(service);
+        }
+    }
+
+    if (removeMissing) {
+        for (const name of this.services.keys()) {
+            if (!activeServices.has(name)) {
+                this.services.delete(name);
             }
         }
     }
+
+    return discovered;
+}
 
     // =====================================================
     // CLIENT CREATION
