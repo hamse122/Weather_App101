@@ -192,16 +192,48 @@ export class JSONValidator {
         };
     }
 
-    // ===============================
-    // Utilities
-    // ===============================
-    static getType(value) {
-        if (Array.isArray(value)) return "array";
-        if (value === null) return "null";
-        if (value instanceof Date) return "date";
-        return typeof value;
+// ===============================
+// Utilities (v2)
+// ===============================
+static getType(value) {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+
+    if (Array.isArray(value)) return "array";
+    if (value instanceof Date) return "date";
+    if (value instanceof RegExp) return "regexp";
+    if (value instanceof Map) return "map";
+    if (value instanceof Set) return "set";
+    if (value instanceof WeakMap) return "weakmap";
+    if (value instanceof WeakSet) return "weakset";
+    if (value instanceof Promise) return "promise";
+    if (value instanceof Error) return "error";
+    if (value instanceof URL) return "url";
+    if (value instanceof ArrayBuffer) return "arraybuffer";
+    if (ArrayBuffer.isView(value)) return value.constructor.name.toLowerCase(); // Uint8Array, Float32Array, etc.
+
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer?.(value)) {
+        return "buffer";
     }
 
+    const tag = Object.prototype.toString.call(value);
+    switch (tag) {
+        case "[object Object]":
+            return "object";
+        case "[object Function]":
+            return "function";
+        case "[object AsyncFunction]":
+            return "asyncfunction";
+        case "[object GeneratorFunction]":
+            return "generatorfunction";
+        case "[object BigInt]":
+            return "bigint";
+        case "[object Symbol]":
+            return "symbol";
+        default:
+            return typeof value;
+    }
+}
     // ===============================
     // Deep Clone (Circular-safe)
     // ===============================
