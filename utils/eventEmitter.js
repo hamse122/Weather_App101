@@ -17,41 +17,90 @@ class EventEmitter {
         this.profile = options.profile ?? false;
     }
 
-    /* ============================================
-       Internal Helpers
-    ============================================ */
-    _getStore(event) {
-        if (!this.events.has(event)) {
-            this.events.set(event, []);
-        }
-        return this.events.get(event);
+/* ============================================
+   Internal Helpers (v2)
+============================================ */
+
+_getStore(event) {
+    if (typeof event !== "string" && typeof event !== "symbol") {
+        throw new TypeError("Event name must be a string or symbol");
     }
 
-    _warnIfExceeded(event) {
-        const count = this.listenerCount(event);
-        if (count > this.maxListeners) {
-            console.warn(
-                `[EventEmitter] Warning: ${count} listeners attached to "${event}". Potential memory leak.`
-            );
-        }
+    if (!this.events.has(event)) {
+        this.events.set(event, []);
     }
 
-    _addListener(event, fn, once = false, prepend = false, priority = 0) {
-        const store = this._getStore(event);
-        const meta = { fn, once, priority };
+    return this.events.get(event);
+}
 
-        if (prepend) store.unshift(meta);
-        else {
-            // Insert by priority
-            let i = store.length;
-            while (i > 0 && store[i - 1].priority > priority) i--;
-            store.splice(i, 0, meta);
+_warnIfExceeded(event) {
+    if (!Number.isFinite(this.maxListeners) || this.maxListeners <= 0) {
+        return;
+    }
+
+    const count = this.listenerCount(event);
+
+    if (count > this.maxListeners) {
+        const warning = new Error(
+            `[EventEmitter] Possible memory leak detected. ${count} listeners attached to "${String(event)}".`
+        );
+
+        warning.name = "MaxListenersExceededWarning";
+
+        if (typeof process !== "undefined" && process.emitWarning) {
+            process.emitWarning(warning);
+        } else {
+            console.warn(warning.message);
         }
+    }
+}
 
-        this._warnIfExceeded(event);
+_addListener(
+    event,
+    fn,
+    once = false,
+    prepend = false,
+    priority = 0
+) {
+    if (typeof fn !== "function") {
+        throw new TypeError("Listener must be a function");
+    }
+
+    const store = this._getStore(event);
+
+    const meta = {
+        fn,
+        once,
+        priority: Number(priority) || 0,
+        addedAt: Date.now(),
+        calls: 0,
+        enabled: true
+    };
+
+    // Prevent duplicate listeners
+    if (store.some(l => l.fn === fn)) {
         return this;
     }
 
+    if (prepend) {
+        store.unshift(meta);
+    } else {
+        // Higher priority executes first
+        let index = store.findIndex(
+            l => l.priority < meta.priority
+        );
+
+        if (index === -1) index = store.length;
+
+        store.splice(index, 0, meta);
+    }
+
+    this._warnIfExceeded(event);
+
+    this.emit?.("newListener", event, fn);
+
+    return this;
+}
     /* ============================================
        Core API
     ============================================ */
