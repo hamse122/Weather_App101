@@ -88,26 +88,55 @@ export class Scheduler {
         }));
     }
 
-    /**
-     * Parse a cron expression
-     */
-    parseCron(expr) {
-        const parts = expr.trim().split(/\s+/);
-        if (parts.length !== 5) {
-            throw new Error(`Invalid cron expression '${expr}'`);
-        }
-
-        const [min, hour, day, month, weekday] = parts;
-
-        return {
-            minute: this.parseCronField(min, 0, 59),
-            hour: this.parseCronField(hour, 0, 23),
-            day: this.parseCronField(day, 1, 31),
-            month: this.parseCronField(month, 1, 12),
-            weekday: this.parseCronField(weekday, 0, 6),
-        };
+/**
+ * Parse a cron expression (v2)
+ * Supports:
+ *  - *
+ *  - */n
+ *  - a,b,c
+ *  - a-b
+ *  - a-b/n
+ *  - Named months (JAN-DEC)
+ *  - Named weekdays (SUN-SAT)
+ */
+parseCron(expr) {
+    if (typeof expr !== "string" || !expr.trim()) {
+        throw new TypeError("Cron expression must be a non-empty string");
     }
 
+    const parts = expr.trim().replace(/\s+/g, " ").split(" ");
+
+    if (parts.length !== 5) {
+        throw new Error(
+            `Invalid cron expression '${expr}'. Expected 5 fields, received ${parts.length}.`
+        );
+    }
+
+    const months = {
+        JAN: 1, FEB: 2, MAR: 3, APR: 4,
+        MAY: 5, JUN: 6, JUL: 7, AUG: 8,
+        SEP: 9, OCT: 10, NOV: 11, DEC: 12
+    };
+
+    const weekdays = {
+        SUN: 0, MON: 1, TUE: 2, WED: 3,
+        THU: 4, FRI: 5, SAT: 6
+    };
+
+    const normalize = (value, aliases) =>
+        value.replace(/[A-Za-z]{3}/gi, m => aliases[m.toUpperCase()] ?? m);
+
+    const [min, hour, day, month, weekday] = parts;
+
+    return Object.freeze({
+        expression: expr,
+        minute: this.parseCronField(min, 0, 59),
+        hour: this.parseCronField(hour, 0, 23),
+        day: this.parseCronField(day, 1, 31),
+        month: this.parseCronField(normalize(month, months), 1, 12),
+        weekday: this.parseCronField(normalize(weekday, weekdays), 0, 6)
+    });
+}
     /**
      * Parse individual cron field (*, numbers, lists)
      */
