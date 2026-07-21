@@ -85,20 +85,40 @@ class Observable {
         });
     }
 
-    /**
-     * Emit error
-     */
-    error(err) {
-        if (this.completed) return;
+/**
+ * Emit error (v2)
+ */
+error(err) {
+    if (this.completed) return false;
 
-        this.observers.forEach(observer => {
-            try {
-                if (observer?.error) observer.error(err);
-            } catch (e) {
-                console.error("Observer error handler failed:", e);
-            }
-        });
+    const error =
+        err instanceof Error
+            ? err
+            : new Error(String(err));
+
+    this.lastError = error;
+    this.completed = true;
+
+    const observers = [...this.observers];
+    const failures = [];
+
+    for (const observer of observers) {
+        try {
+            observer?.error?.(error);
+        } catch (e) {
+            failures.push(e);
+            console.error("[Observable] Observer error handler failed:", e);
+        }
     }
+
+    // Optional global error hook
+    this.onError?.(error, failures);
+
+    // Terminal event: release observers
+    this.observers.clear?.();
+
+    return true;
+}
 
     /**
      * Complete stream: notify & stop future subscriptions
