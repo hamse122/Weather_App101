@@ -51,36 +51,62 @@ export class Compression {
         return result;
     }
 
-    /**
-     * Decompress safe RLE format
-     */
-    static decompressRLE(compressed = "") {
-        if (!compressed) return "";
+/**
+ * Decompress safe RLE format (v2)
+ */
+static decompressRLE(compressed = "") {
+    if (typeof compressed !== "string" || compressed.length === 0) {
+        return "";
+    }
 
-        let output = "";
-        let i = 0;
+    const MAX_REPEAT = 1_000_000;
+    let output = [];
+    let i = 0;
 
-        while (i < compressed.length) {
-            if (compressed[i] === "~") {
-                i++;
-                let num = "";
+    while (i < compressed.length) {
 
-                while (compressed[i] !== ":" && i < compressed.length) {
-                    num += compressed[i++];
-                }
-                i++; // skip ":"
-
-                const char = compressed[i] ?? "";
-                const count = Math.min(parseInt(num, 10) || 0, 1e6);
-                output += char.repeat(count);
-            } else {
-                output += compressed[i];
-            }
-            i++;
+        if (compressed[i] !== "~") {
+            output.push(compressed[i++]);
+            continue;
         }
 
-        return output;
+        i++; // Skip "~"
+
+        let countStr = "";
+
+        while (i < compressed.length && compressed[i] !== ":") {
+            if (compressed[i] < "0" || compressed[i] > "9") {
+                throw new Error("Invalid RLE format: invalid repeat count");
+            }
+            countStr += compressed[i++];
+        }
+
+        if (i >= compressed.length || compressed[i] !== ":") {
+            throw new Error("Invalid RLE format: missing ':'");
+        }
+
+        i++; // Skip ":"
+
+        if (i >= compressed.length) {
+            throw new Error("Invalid RLE format: missing character");
+        }
+
+        const count = Number(countStr);
+
+        if (
+            !Number.isSafeInteger(count) ||
+            count < 0 ||
+            count > MAX_REPEAT
+        ) {
+            throw new RangeError("Invalid RLE repeat count");
+        }
+
+        output.push(compressed[i].repeat(count));
+        i++;
     }
+
+    return output.join("");
+}
 
     /* -------------------------------------------------------
        JSON COMPRESSION (Optimized + Optional RLE)
