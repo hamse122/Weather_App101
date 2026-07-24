@@ -161,44 +161,82 @@ class MetricsCollector {
         return recent.length / (windowMs / 1000);
     }
 
-    /* ---------------- EXPORT SYSTEM ---------------- */
-    registerExporter(exporter) {
+/* ---------------- EXPORT SYSTEM ---------------- */
+
+registerExporter(exporter) {
+    if (typeof exporter !== "function") {
+        throw new TypeError("Exporter must be a function");
+    }
+
+    if (!this.exporters.includes(exporter)) {
         this.exporters.push(exporter);
-        return this;
     }
 
-    async _flush() {
-        if (!this.buffer.length) return;
-        const batch = this.buffer.splice(0, this.batchSize);
+    return this;
+}
 
-        await Promise.all(
-            this.exporters.map(async (exporter) => {
-                try {
-                    await exporter(batch);
-                } catch (e) {
-                    console.error("Exporter failed:", e);
+async _flush({ force = false } = {}) {
+    if (this._isFlushing) return;
+    if (!force && this.buffer.length === 0) return;
+
+    this._isFlushing = true;
+
+    try {
+        while (this.buffer.length) {
+            const batch = this.buffer.splice(0, this.batchSize);
+
+            const results = await Promise.allSettled(
+                this.exporters.map(exporter => exporter(batch))
+            );
+
+            results.forEach(result => {
+                if (result.status === "rejected") {
+                    console.error("[Metrics Exporter]", result.reason);
                 }
-            })
-        );
-    }
-
-    _record(metric) {
-        metric.lastUpdated = Date.now();
-        this.buffer.push({ ...metric });
-
-        if (this.buffer.length >= this.batchSize) {
-            this._flush();
+            });
         }
+    } finally {
+        this._isFlushing = false;
+    }
+}
+
+_record(metric) {
+    metric.lastUpdated = Date.now();
+
+    this.buffer.push(
+        typeof structuredClone === "function"
+            ? structuredClone(metric)
+            : { ...metric }
+    );
+
+    if (
+        this.buffer.length >= this.batchSize &&
+        !this._isFlushing
+    ) {
+        queueMicrotask(() => this._flush());
+    }
+}
+
+_startAutoExport() {
+    if (this.timer) return;
+
+    this.timer = setInterval(() => {
+        this._flush();
+    }, this.exportInterval);
+
+    this.timer.unref?.();
+}
+
+async stopAutoExport({ flush = true } = {}) {
+    if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
     }
 
-    _startAutoExport() {
-        this.timer = setInterval(() => this._flush(), this.exportInterval);
-        this.timer.unref?.();
+    if (flush) {
+        await this._flush({ force: true });
     }
-
-    stopAutoExport() {
-        if (this.timer) clearInterval(this.timer);
-    }
+}
 
     /* ---------------- HEALTH METRICS ---------------- */
     collectSystemMetrics() {
