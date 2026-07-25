@@ -72,39 +72,98 @@ class TestUtils {
         }
     }
 
-    // =====================
-    // TEST RUNNER
-    // =====================
-    static describe(name, fn) {
-        console.log(`\n📦 ${name}`);
-        try {
-            fn();
-        } catch {
-            // handled per-test
+// =====================
+// TEST RUNNER
+// =====================
+
+static describe(name, fn) {
+    console.log(`\n📦 ${name}`);
+
+    try {
+        const result = fn();
+
+        if (result instanceof Promise) {
+            return result.catch(err => {
+                console.error(`❌ Suite "${name}" failed`);
+                console.error(err);
+            });
         }
+    } catch (err) {
+        console.error(`❌ Suite "${name}" failed`);
+        console.error(err);
     }
+}
 
-    static async it(name, fn, timeout = 2000) {
-        const start = Date.now();
+static async it(
+    name,
+    fn,
+    {
+        timeout = 2000,
+        retries = 0,
+        signal
+    } = {}
+) {
+    let attempt = 0;
+    let lastError;
+
+    while (attempt <= retries) {
+        const start =
+            typeof performance !== "undefined"
+                ? performance.now()
+                : Date.now();
 
         try {
-            const result = fn();
-            if (result instanceof Promise) {
-                await Promise.race([
-                    result,
-                    new Promise((_, r) =>
-                        setTimeout(() => r(new Error("Timeout exceeded")), timeout)
-                    )
-                ]);
+            if (signal?.aborted) {
+                throw new Error("Test aborted");
             }
 
-            console.log(`  ✅ ${name} (${Date.now() - start}ms)`);
-        } catch (e) {
-            console.error(`  ❌ ${name}`);
-            console.error(`     → ${e.message}`);
-            throw e;
+            const execution = Promise.resolve().then(fn);
+
+            await Promise.race([
+                execution,
+                new Promise((_, reject) => {
+                    const timer = setTimeout(() => {
+                        clearTimeout(timer);
+                        reject(new Error(`Timeout exceeded (${timeout}ms)`));
+                    }, timeout);
+
+                    signal?.addEventListener(
+                        "abort",
+                        () => {
+                            clearTimeout(timer);
+                            reject(new Error("Test aborted"));
+                        },
+                        { once: true }
+                    );
+                })
+            ]);
+
+            const duration =
+                (typeof performance !== "undefined"
+                    ? performance.now()
+                    : Date.now()) - start;
+
+            console.log(
+                `  ✅ ${name} (${duration.toFixed(2)}ms${
+                    attempt ? ` • retry ${attempt}` : ""
+                })`
+            );
+
+            return;
+        } catch (err) {
+            lastError = err;
+            attempt++;
+
+            if (attempt <= retries) {
+                console.warn(`  🔄 Retrying "${name}" (${attempt}/${retries})`);
+            }
         }
     }
+
+    console.error(`  ❌ ${name}`);
+    console.error(`     → ${lastError.message}`);
+
+    throw lastError;
 }
 
 /**
