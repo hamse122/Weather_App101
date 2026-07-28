@@ -27,25 +27,56 @@ class StateManager {
         return this.devMode ? deepFreeze(snapshot) : snapshot;
     }
 
-    /* ---------------------------------- */
-    /* Dispatch */
-    /* ---------------------------------- */
-    dispatch(action) {
-        if (!action || typeof action.type !== "string") {
-            throw new Error("Invalid action. Must have a type.");
-        }
-
-        const prevState = this.state;
-
-        const chain = this._composeMiddleware();
-        const nextState = chain(action);
-
-        if (Object.is(prevState, nextState)) return action;
-
-        this._commit(prevState, action, nextState);
-        return action;
+/* ---------------------------------- */
+/* Dispatch */
+/* ---------------------------------- */
+async dispatch(action) {
+    if (
+        !action ||
+        typeof action !== "object" ||
+        typeof action.type !== "string" ||
+        !action.type.trim()
+    ) {
+        throw new TypeError("Action must be an object with a non-empty string 'type'.");
     }
 
+    if (this._isDispatching) {
+        throw new Error("Cannot dispatch while another dispatch is in progress.");
+    }
+
+    const prevState = this.state;
+    const start =
+        typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now();
+
+    this._isDispatching = true;
+
+    try {
+        const chain = this._composeMiddleware();
+
+        const nextState = await Promise.resolve(chain(action));
+
+        if (Object.is(prevState, nextState)) {
+            return action;
+        }
+
+        this._commit(prevState, action, nextState);
+
+        this.lastAction = action;
+        this.lastDispatchDuration =
+            (typeof performance !== "undefined"
+                ? performance.now()
+                : Date.now()) - start;
+
+        return action;
+    } catch (err) {
+        this.onDispatchError?.(err, action);
+        throw err;
+    } finally {
+        this._isDispatching = false;
+    }
+}
     /* ---------------------------------- */
     /* Middleware */
     /* ---------------------------------- */
