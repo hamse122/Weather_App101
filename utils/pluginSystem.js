@@ -1,44 +1,70 @@
-// Advanced Plugin System with priorities, async lifecycles & safe hook execution
+// Advanced Plugin System (2026 Edition)
 class PluginSystem {
-    constructor() {
+    constructor({
+        hookTimeout = 5000,
+        continueOnError = true
+    } = {}) {
         this.plugins = new Map();
-        this.hooks = new Map(); // hookName -> [{ fn, priority, once, pluginName }]
+        this.hooks = new Map();
+
+        this.hookTimeout = hookTimeout;
+        this.continueOnError = continueOnError;
+
+        this.disabledPlugins = new Set();
+        this.metrics = {
+            executedHooks: 0,
+            failedHooks: 0,
+            pluginErrors: 0
+        };
     }
 
-    register(pluginName, plugin) {
+    async register(pluginName, plugin = {}) {
         if (this.plugins.has(pluginName)) {
             throw new Error(`Plugin '${pluginName}' already registered`);
         }
 
-        this.plugins.set(pluginName, plugin);
+        // Dependency check
+        for (const dep of plugin.dependencies || []) {
+            if (!this.plugins.has(dep)) {
+                throw new Error(
+                    `Plugin '${pluginName}' requires '${dep}'`
+                );
+            }
+        }
 
-        // Register hooks (if any)
-        if (plugin.hooks) {
-            Object.keys(plugin.hooks).forEach(hookName => {
-                const hookDef = plugin.hooks[hookName];
-                const hookInfo = {
-                    fn: hookDef.fn || hookDef,
-                    priority: hookDef.priority || 0,
-                    once: hookDef.once || false,
-                    pluginName
-                };
+        const meta = {
+            name: pluginName,
+            version: plugin.version ?? "1.0.0",
+            author: plugin.author ?? null,
+            enabled: true,
+            registeredAt: Date.now(),
+            ...plugin
+        };
 
+        this.plugins.set(pluginName, meta);
+
+        // Register hooks
+        if (meta.hooks) {
+            for (const [hookName, hookDef] of Object.entries(meta.hooks)) {
                 if (!this.hooks.has(hookName)) {
                     this.hooks.set(hookName, []);
                 }
 
-                this.hooks.get(hookName).push(hookInfo);
+                this.hooks.get(hookName).push({
+                    fn: hookDef.fn || hookDef,
+                    priority: hookDef.priority ?? 0,
+                    once: !!hookDef.once,
+                    timeout: hookDef.timeout ?? this.hookTimeout,
+                    pluginName
+                });
 
-                // Sort hooks by priority (higher runs first)
-                this.hooks.get(hookName).sort((a, b) => b.priority - a.priority);
-            });
+                this.hooks.get(hookName)
+                    .sort((a, b) => b.priority - a.priority);
+            }
         }
 
-        // Async init supported
-        if (typeof plugin.init === "function") {
-            Promise.resolve(plugin.init(this)).catch(err =>
-                console.error(`Plugin '${pluginName}' init error:`, err)
-            );
+        if (typeof meta.init === "function") {
+            await Promise.resolve(meta.init(this));
         }
 
         return this;
@@ -48,68 +74,117 @@ class PluginSystem {
         const plugin = this.plugins.get(pluginName);
         if (!plugin) return this;
 
-        // Remove hooks linked to this plugin
-        for (const [hookName, hookList] of this.hooks.entries()) {
-            this.hooks.set(
-                hookName,
-                hookList.filter(h => h.pluginName !== pluginName)
+        for (const [hookName, hooks] of this.hooks) {
+            const filtered = hooks.filter(
+                h => h.pluginName !== pluginName
             );
 
-            // Clean empty arrays
-            if (this.hooks.get(hookName).length === 0) {
+            if (filtered.length) {
+                this.hooks.set(hookName, filtered);
+            } else {
                 this.hooks.delete(hookName);
             }
         }
 
-        // Async destroy supported
         if (typeof plugin.destroy === "function") {
-            try {
-                await plugin.destroy();
-            } catch (err) {
-                console.error(`Plugin '${pluginName}' destroy error:`, err);
-            }
+            await Promise.resolve(plugin.destroy());
         }
 
         this.plugins.delete(pluginName);
+        this.disabledPlugins.delete(pluginName);
+
         return this;
     }
 
     async executeHook(hookName, context = {}, ...args) {
-        const hooks = this.hooks.get(hookName) || [];
+        const hooks = [...(this.hooks.get(hookName) || [])];
         const results = [];
 
-        for (const hookInfo of [...hooks]) {
+        for (const hook of hooks) {
+            if (this.disabledPlugins.has(hook.pluginName)) {
+                continue;
+            }
+
             try {
-                const { fn, once, pluginName } = hookInfo;
-                const result = await fn(context, ...args);
+                const execution = Promise.resolve(
+                    hook.fn(context, ...args)
+                );
+
+                const result = await Promise.race([
+                    execution,
+                    new Promise((_, reject) =>
+                        setTimeout(
+                            () => reject(new Error("Hook timeout")),
+                            hook.timeout
+                        )
+                    )
+                ]);
+
+                this.metrics.executedHooks++;
                 results.push(result);
 
-                // auto-remove once-only hook
-                if (once) {
-                    this.unregister(pluginName);
+                if (hook.once) {
+                    await this.unregister(hook.pluginName);
                 }
 
-            } catch (error) {
+            } catch (err) {
+                this.metrics.failedHooks++;
+
                 console.error(
-                    `Hook '${hookName}' execution error in plugin '${hookInfo.pluginName}':`,
-                    error
+                    `Hook '${hookName}' failed in '${hook.pluginName}':`,
+                    err
                 );
+
+                if (!this.continueOnError) {
+                    throw err;
+                }
             }
         }
 
         return results;
     }
 
+    enable(pluginName) {
+        this.disabledPlugins.delete(pluginName);
+        return this;
+    }
+
+    disable(pluginName) {
+        this.disabledPlugins.add(pluginName);
+        return this;
+    }
+
+    isEnabled(pluginName) {
+        return !this.disabledPlugins.has(pluginName);
+    }
+
     getPlugin(pluginName) {
-        return this.plugins.get(pluginName);
+        return this.plugins.get(pluginName) ?? null;
+    }
+
+    hasPlugin(pluginName) {
+        return this.plugins.has(pluginName);
     }
 
     listPlugins() {
-        return [...this.plugins.keys()];
+        return [...this.plugins.values()].map(p => ({
+            name: p.name,
+            version: p.version,
+            enabled: this.isEnabled(p.name)
+        }));
     }
 
     listHooks() {
         return [...this.hooks.keys()];
+    }
+
+    getMetrics() {
+        return {
+            ...this.metrics,
+            plugins: this.plugins.size,
+            hooks: [...this.hooks.values()]
+                .reduce((t, h) => t + h.length, 0)
+        };
     }
 }
 
