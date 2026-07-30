@@ -18,20 +18,90 @@ class EnvError extends Error {
    Helpers
 -------------------------------------------------------- */
 
-function readEnv(name) {
-  const raw = process.env[name];
+const __envCache = new Map();
 
-  if (typeof raw !== "string") return undefined;
+function readEnv(
+    name,
+    {
+        fallback,
+        aliases = [],
+        parser = v => v,
+        validate = null,
+        cache = true
+    } = {}
+) {
+    const keys = [name, ...aliases];
 
-  const trimmed = raw.trim();
-  return trimmed === "" ? undefined : trimmed;
+    for (const key of keys) {
+        if (cache && __envCache.has(key)) {
+            return __envCache.get(key);
+        }
+
+        const raw = process.env[key];
+
+        if (typeof raw !== "string") continue;
+
+        const value = raw.trim();
+        if (!value) continue;
+
+        let parsed;
+
+        try {
+            parsed = parser(value);
+        } catch (err) {
+            throw new EnvError(
+                `Invalid value for environment variable '${key}'`,
+                key,
+                {
+                    received: value,
+                    cause: err.message
+                }
+            );
+        }
+
+        if (validate && !validate(parsed)) {
+            throw new EnvError(
+                `Validation failed for environment variable '${key}'`,
+                key,
+                { received: parsed }
+            );
+        }
+
+        if (cache) {
+            __envCache.set(key, parsed);
+        }
+
+        return parsed;
+    }
+
+    return fallback;
 }
 
-function throwMissing(name) {
-  throw new EnvError(`Missing required environment variable: ${name}`, name, {
-    expected: "non-empty string",
-    received: "undefined or empty"
-  });
+function throwMissing(name, options = {}) {
+    const {
+        aliases = [],
+        expected = "non-empty string",
+        example
+    } = options;
+
+    const message = [
+        `Missing required environment variable: ${name}`,
+        aliases.length
+            ? `Aliases checked: ${aliases.join(", ")}`
+            : null,
+        example
+            ? `Example: ${name}=${example}`
+            : null
+    ]
+        .filter(Boolean)
+        .join("\n");
+
+    throw new EnvError(message, name, {
+        expected,
+        received: "undefined, null, or empty string",
+        aliases,
+        example
+    });
 }
 
 /* --------------------------------------------------------
