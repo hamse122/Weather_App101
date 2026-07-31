@@ -11,30 +11,69 @@ class Formatter {
         return this.#cache.get(key);
     }
 
-    /* -------------------- Currency -------------------- */
-    static formatCurrency(amount, options = {}) {
-        const {
-            currency = 'USD',
-            locale = 'en-US',
+/* -------------------- Currency -------------------- */
+static formatCurrency(amount, options = {}) {
+    const {
+        currency = "USD",
+        locale = "en-US",
+        minimumFractionDigits,
+        maximumFractionDigits,
+        currencyDisplay = "symbol",      // symbol | code | name | narrowSymbol
+        currencySign = "standard",       // standard | accounting
+        notation = "standard",           // standard | compact
+        signDisplay = "auto",
+        roundingPriority = "auto",
+        useGrouping = true,
+        fallback = ""
+    } = options;
+
+    if (typeof amount === "bigint") {
+        amount = Number(amount);
+    }
+
+    if (!Number.isFinite(amount)) {
+        return fallback;
+    }
+
+    try {
+        const key = JSON.stringify({
+            type: "currency",
+            locale,
+            currency,
             minimumFractionDigits,
-            maximumFractionDigits
-        } = options;
-
-        if (!Number.isFinite(amount)) return '';
-
-        const key = `currency-${locale}-${currency}-${minimumFractionDigits}-${maximumFractionDigits}`;
+            maximumFractionDigits,
+            currencyDisplay,
+            currencySign,
+            notation,
+            signDisplay,
+            roundingPriority,
+            useGrouping
+        });
 
         const formatter = this.#getFormatter(key, () =>
             new Intl.NumberFormat(locale, {
-                style: 'currency',
+                style: "currency",
                 currency,
-                minimumFractionDigits,
-                maximumFractionDigits
+                currencyDisplay,
+                currencySign,
+                notation,
+                signDisplay,
+                roundingPriority,
+                useGrouping,
+                ...(minimumFractionDigits !== undefined && {
+                    minimumFractionDigits
+                }),
+                ...(maximumFractionDigits !== undefined && {
+                    maximumFractionDigits
+                })
             })
         );
 
         return formatter.format(amount);
+    } catch {
+        return fallback || `${currency} ${amount}`;
     }
+}
 
     /* -------------------- Dates -------------------- */
     static formatDate(date, options = {}) {
