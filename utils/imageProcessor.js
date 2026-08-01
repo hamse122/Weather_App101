@@ -214,43 +214,153 @@ class ImageProcessor {
         return results;
     }
 
-    /* ---------------- PIPELINE (CHAINABLE) ---------------- */
-    static pipeline(canvas) {
-        const self = this;
-        return {
-            grayscale() {
-                self.applyFilter(canvas, self.grayscale);
-                return this;
-            },
-            invert() {
-                self.applyFilter(canvas, self.invert);
-                return this;
-            },
-            brightness(v) {
-                self.applyFilter(canvas, self.brightness, v);
-                return this;
-            },
-            contrast(v) {
-                self.applyFilter(canvas, self.contrast, v);
-                return this;
-            },
-            sepia() {
-                self.applyFilter(canvas, self.sepia);
-                return this;
-            },
-            rotate(angle) {
-                canvas = self.rotate(canvas, angle);
-                return this;
-            },
-            resize(w, h) {
-                canvas = self.resize(canvas, w, h);
-                return this;
-            },
-            done() {
-                return canvas;
+/* ---------------- PIPELINE (2026) ---------------- */
+static pipeline(inputCanvas) {
+    const self = this;
+
+    let canvas = inputCanvas;
+    const original = self.createCanvas(canvas.width, canvas.height);
+    self.getContext(original).drawImage(canvas, 0, 0);
+
+    const history = [];
+    const future = [];
+
+    const snapshot = () => {
+        const copy = self.createCanvas(canvas.width, canvas.height);
+        self.getContext(copy).drawImage(canvas, 0, 0);
+        history.push(copy);
+        future.length = 0;
+
+        if (history.length > 50) history.shift();
+    };
+
+    return {
+        grayscale() {
+            snapshot();
+            self.applyFilter(canvas, self.grayscale);
+            return this;
+        },
+
+        invert() {
+            snapshot();
+            self.applyFilter(canvas, self.invert);
+            return this;
+        },
+
+        brightness(value) {
+            snapshot();
+            self.applyFilter(canvas, self.brightness, value);
+            return this;
+        },
+
+        contrast(value) {
+            snapshot();
+            self.applyFilter(canvas, self.contrast, value);
+            return this;
+        },
+
+        sepia() {
+            snapshot();
+            self.applyFilter(canvas, self.sepia);
+            return this;
+        },
+
+        rotate(angle) {
+            snapshot();
+            canvas = self.rotate(canvas, angle);
+            return this;
+        },
+
+        resize(width, height, quality = "high") {
+            snapshot();
+            canvas = self.resize(canvas, width, height, quality);
+            return this;
+        },
+
+        watermark(text, options = {}) {
+            snapshot();
+            self.watermark(canvas, text, options);
+            return this;
+        },
+
+        custom(fn) {
+            if (typeof fn !== "function") {
+                throw new TypeError("Custom processor must be a function");
             }
-        };
-    }
+
+            snapshot();
+
+            const result = fn(canvas);
+
+            if (result) {
+                canvas = result;
+            }
+
+            return this;
+        },
+
+        async customAsync(fn) {
+            if (typeof fn !== "function") {
+                throw new TypeError("Custom processor must be a function");
+            }
+
+            snapshot();
+
+            const result = await fn(canvas);
+
+            if (result) {
+                canvas = result;
+            }
+
+            return this;
+        },
+
+        undo() {
+            if (!history.length) return this;
+
+            future.push(canvas);
+            canvas = history.pop();
+
+            return this;
+        },
+
+        redo() {
+            if (!future.length) return this;
+
+            history.push(canvas);
+            canvas = future.pop();
+
+            return this;
+        },
+
+        reset() {
+            canvas = self.createCanvas(original.width, original.height);
+            self.getContext(canvas).drawImage(original, 0, 0);
+
+            history.length = 0;
+            future.length = 0;
+
+            return this;
+        },
+
+        clone() {
+            const copy = self.createCanvas(canvas.width, canvas.height);
+            self.getContext(copy).drawImage(canvas, 0, 0);
+            return copy;
+        },
+
+        async toBlob(type = "image/png", quality = 0.92) {
+            return self.toBlob(canvas, type, quality);
+        },
+
+        toDataURL(type = "image/png", quality = 0.92) {
+            return self.toDataURL(canvas, type, quality);
+        },
+
+        done() {
+            return canvas;
+        }
+    };
 }
 
 module.exports = ImageProcessor;
