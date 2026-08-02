@@ -46,40 +46,82 @@ export class EnhancedErrorHandler {
         return () => this.subscribers.delete(subscriber);
     }
 
-    /* =========================
-       Core Handling
-    ========================== */
+/* =========================
+   Core Handling
+========================== */
 
-    async handle(error, context = {}) {
-        const payload = this._buildPayload(error, context);
+async handle(error, context = {}) {
+    const payload = Object.freeze(
+        typeof structuredClone === "function"
+            ? structuredClone(this._buildPayload(error, context))
+            : { ...this._buildPayload(error, context) }
+    );
 
-        if (!this._allowLog()) return null;
+    if (!this._allowLog()) {
+        return null;
+    }
 
-        // Notify observers (async safe)
+    const start =
+        typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now();
+
+    try {
+        // Notify subscribers (isolated)
         await Promise.allSettled(
-            [...this.subscribers].map(sub => sub(payload))
+            [...this.subscribers].map(sub =>
+                Promise.resolve().then(() => sub(payload))
+            )
         );
 
-        // Send to transports
-        for (const transport of this.transports) {
-            try {
-                await transport(payload);
-            } catch (_) {}
+        // Send to transports concurrently
+        const transportResults = await Promise.allSettled(
+            this.transports.map(transport =>
+                Promise.resolve().then(() => transport(payload))
+            )
+        );
+
+        transportResults.forEach(result => {
+            if (result.status === "rejected") {
+                console.error("[ErrorHandler] Transport failed:", result.reason);
+            }
+        });
+
+        // Internal logger should never break handling
+        try {
+            await Promise.resolve(this.logger(payload));
+        } catch (err) {
+            console.error("[ErrorHandler] Logger failed:", err);
         }
 
-        // Log
-        this.logger(payload);
-
         const entry =
-            this.handlers.get(payload.type) ||
+            this.handlers.get(payload.type) ??
             this.handlers.get("default");
 
         if (!entry) {
-            return this.globalFallback?.(error, context);
+            return this.globalFallback
+                ? await this.globalFallback(error, context)
+                : null;
         }
 
-        return this._executeWithResilience(entry, error, context);
+        return await this._executeWithResilience(entry, error, context);
+
+    } finally {
+        this.metrics ??= {
+            handled: 0,
+            totalTime: 0,
+            lastHandledAt: null
+        };
+
+        this.metrics.handled++;
+        this.metrics.totalTime +=
+            (typeof performance !== "undefined"
+                ? performance.now()
+                : Date.now()) - start;
+
+        this.metrics.lastHandledAt = Date.now();
     }
+}
     
     /* =========================
        Resilience
