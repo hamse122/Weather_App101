@@ -105,57 +105,110 @@ export class NotificationSystem {
         this._emit("clear", null);
     }
 
-    // =====================
-    // TIMERS
-    // =====================
-    _schedule(n) {
-        if (n.duration <= 0 || this.paused) return;
+// =====================
+// TIMERS
+// =====================
 
-        n.remaining ??= n.duration;
-        const start = Date.now();
-
-        const timer = setTimeout(() => {
-            this.remove(n.id);
-        }, n.remaining);
-
-        n._startedAt = start;
-        this.timers.set(n.id, timer);
+_schedule(notification) {
+    if (
+        !notification ||
+        notification.duration <= 0 ||
+        this.paused ||
+        notification.remaining <= 0
+    ) {
+        return;
     }
 
-    pause(id = null) {
-        if (id === null) {
-            this.paused = true;
-            this.notifications.forEach(n => this.pause(n.id));
-            return;
+    // Prevent duplicate timers
+    this._clearTimer(notification.id);
+
+    notification.remaining ??= notification.duration;
+    notification._startedAt = performance?.now?.() ?? Date.now();
+    notification._paused = false;
+
+    const timer = setTimeout(() => {
+        this.timers.delete(notification.id);
+        this.remove(notification.id);
+    }, notification.remaining);
+
+    this.timers.set(notification.id, timer);
+}
+
+pause(id = null) {
+    if (id === null) {
+        if (this.paused) return;
+
+        this.paused = true;
+
+        for (const notification of this.notifications.values()) {
+            this.pause(notification.id);
         }
 
-        const n = this.notifications.get(id);
-        if (!n) return;
-
-        this._clearTimer(id);
-        n.remaining -= Date.now() - n._startedAt;
-        this._emit("pause", n);
+        return;
     }
 
-    resume(id = null) {
-        if (id === null) {
-            this.paused = false;
-            this.notifications.forEach(n => this.resume(n.id));
-            return;
+    const notification = this.notifications.get(id);
+
+    if (
+        !notification ||
+        notification._paused ||
+        !this.timers.has(id)
+    ) {
+        return;
+    }
+
+    const now = performance?.now?.() ?? Date.now();
+
+    this._clearTimer(id);
+
+    notification.remaining = Math.max(
+        0,
+        notification.remaining - (now - notification._startedAt)
+    );
+
+    notification._paused = true;
+
+    this._emit("pause", notification);
+}
+
+resume(id = null) {
+    if (id === null) {
+        if (!this.paused) return;
+
+        this.paused = false;
+
+        for (const notification of this.notifications.values()) {
+            this.resume(notification.id);
         }
 
-        const n = this.notifications.get(id);
-        if (!n || n.remaining <= 0) return;
-
-        this._schedule(n);
-        this._emit("resume", n);
+        return;
     }
 
-    _clearTimer(id) {
-        const t = this.timers.get(id);
-        if (t) clearTimeout(t);
+    const notification = this.notifications.get(id);
+
+    if (
+        !notification ||
+        !notification._paused ||
+        notification.remaining <= 0
+    ) {
+        return;
+    }
+
+    notification._paused = false;
+
+    this._schedule(notification);
+
+    this._emit("resume", notification);
+}
+
+_clearTimer(id) {
+    const timer = this.timers.get(id);
+
+    if (timer) {
+        clearTimeout(timer);
         this.timers.delete(id);
     }
+}
 
     // =====================
     // LIMITS
