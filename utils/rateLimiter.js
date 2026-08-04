@@ -68,28 +68,57 @@ export class RateLimiter {
     this.memory.set(key, bucket);
   }
 
-  /* ---------------------------------- */
-  /* Token Bucket */
-  /* ---------------------------------- */
+/* ---------------------------------- */
+/* Token Bucket */
+/* ---------------------------------- */
 
-  _token(bucket) {
+_token(bucket) {
     const now = this._now();
-    const refillRate = this.maxRequests / this.timeWindow;
-    const elapsed = now - bucket.lastRefill;
 
-    bucket.tokens = Math.min(
-      this.capacity,
-      bucket.tokens + elapsed * refillRate
-    );
-    bucket.lastRefill = now;
+    // Initialize missing state
+    bucket.tokens ??= this.capacity;
+    bucket.lastRefill ??= now;
 
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1;
-      return this._allow(bucket, Math.floor(bucket.tokens));
+    // Protect against invalid configuration
+    if (this.timeWindow <= 0 || this.maxRequests <= 0) {
+        return this._deny(bucket, Infinity);
     }
 
-    return this._deny(bucket, (1 - bucket.tokens) / refillRate);
-  }
+    const refillRate = this.maxRequests / this.timeWindow;
+    const elapsed = Math.max(0, now - bucket.lastRefill);
+
+    // Refill tokens
+    if (elapsed > 0) {
+        bucket.tokens = Math.min(
+            this.capacity,
+            bucket.tokens + elapsed * refillRate
+        );
+        bucket.lastRefill = now;
+    }
+
+    // Consume token
+    if (bucket.tokens >= 1) {
+        bucket.tokens -= 1;
+
+        bucket.remaining = Math.floor(bucket.tokens);
+        bucket.resetAt =
+            now + ((this.capacity - bucket.tokens) / refillRate);
+
+        return this._allow(bucket, bucket.remaining);
+    }
+
+    // Calculate retry time
+    const retryAfter = Math.max(
+        0,
+        (1 - bucket.tokens) / refillRate
+    );
+
+    bucket.remaining = 0;
+    bucket.retryAfter = retryAfter;
+    bucket.resetAt = now + retryAfter;
+
+    return this._deny(bucket, retryAfter);
+}
 
   /* ---------------------------------- */
   /* Fixed Window */
