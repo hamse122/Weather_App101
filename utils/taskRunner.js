@@ -59,17 +59,74 @@ class TaskRunner {
         return this;
     }
 
-    // =====================
-    // EVENTS
-    // =====================
-    on(event, handler) {
-        (this.events[event] ||= []).push(handler);
-        return this;
+// =====================
+// EVENTS
+// =====================
+
+on(event, handler, { once = false, priority = 0 } = {}) {
+    if (typeof handler !== "function") {
+        throw new TypeError("Event handler must be a function");
     }
 
-    emit(event, payload) {
-        (this.events[event] || []).forEach(fn => fn(payload));
+    (this.events[event] ??= []).push({
+        handler,
+        once,
+        priority
+    });
+
+    this.events[event].sort((a, b) => b.priority - a.priority);
+
+    return () => this.off(event, handler);
+}
+
+off(event, handler) {
+    const listeners = this.events[event];
+    if (!listeners) return this;
+
+    this.events[event] = listeners.filter(
+        listener => listener.handler !== handler
+    );
+
+    if (this.events[event].length === 0) {
+        delete this.events[event];
     }
+
+    return this;
+}
+
+once(event, handler, options = {}) {
+    return this.on(event, handler, {
+        ...options,
+        once: true
+    });
+}
+
+async emit(event, payload) {
+    const listeners = [
+        ...(this.events[event] ?? []),
+        ...(this.events["*"] ?? [])
+    ];
+
+    for (const listener of listeners) {
+        try {
+            if (event === "*") {
+                await listener.handler(payload);
+            } else if ((this.events["*"] ?? []).includes(listener)) {
+                await listener.handler(event, payload);
+            } else {
+                await listener.handler(payload);
+            }
+
+            if (listener.once) {
+                this.off(event, listener.handler);
+            }
+        } catch (err) {
+            console.error(`[Event:${event}]`, err);
+        }
+    }
+
+    return listeners.length;
+}
 
     // =====================
     // RUNNER
