@@ -42,17 +42,51 @@ class StateMachine {
         (this.events[event] || []).forEach(cb => cb(payload));
     }
 
-    /* ---------------- STATE DEFINITION ---------------- */
-    defineState(state, config = {}) {
-        this.states.set(state, {
-            onEnter: config.onEnter || null,
-            onExit: config.onExit || null,
-            onUpdate: config.onUpdate || null,
-            meta: config.meta || {},
-            parent: config.parent || null // for hierarchical states
-        });
-        return this;
+/* ---------------- STATE DEFINITION ---------------- */
+
+defineState(state, config = {}) {
+    if (typeof state !== "string" || !state.trim()) {
+        throw new TypeError("State name must be a non-empty string");
     }
+
+    if (this.states.has(state)) {
+        throw new Error(`State "${state}" is already defined`);
+    }
+
+    const {
+        onEnter = null,
+        onExit = null,
+        onUpdate = null,
+        parent = null,
+        meta = {},
+        timeout = null,
+        tags = []
+    } = config;
+
+    if (parent && !this.states.has(parent)) {
+        throw new Error(`Parent state "${parent}" does not exist`);
+    }
+
+    const stateConfig = Object.freeze({
+        name: state,
+        parent,
+        onEnter: typeof onEnter === "function" ? onEnter : null,
+        onExit: typeof onExit === "function" ? onExit : null,
+        onUpdate: typeof onUpdate === "function" ? onUpdate : null,
+        timeout: Number.isFinite(timeout) ? timeout : null,
+        tags: Object.freeze([...new Set(tags)]),
+        meta: Object.freeze(
+            typeof structuredClone === "function"
+                ? structuredClone(meta)
+                : { ...meta }
+        ),
+        createdAt: Date.now()
+    });
+
+    this.states.set(state, stateConfig);
+
+    return this;
+}
 
     /* ---------------- MIDDLEWARE ---------------- */
     use(fn) {
