@@ -128,54 +128,167 @@ class LinkedList {
 }
 
 /* =========================================================
- * STACK
+ * STACK (2026 Edition)
  * =======================================================*/
 
 class Stack {
-  constructor(maxSize = Infinity) {
-    this.items = [];
-    this.maxSize = maxSize;
-  }
+    constructor(maxSize = Infinity) {
+        if (!Number.isFinite(maxSize) && maxSize !== Infinity) {
+            throw new TypeError("maxSize must be a number or Infinity");
+        }
 
-  push(item) {
-    if (this.size() >= this.maxSize) {
-      throw new Error('Stack overflow');
+        this.items = [];
+        this.maxSize = maxSize;
+        this.locked = false;
     }
-    this.items.push(item);
-  }
 
-  pop() {
-    if (this.isEmpty()) {
-      throw new Error('Stack underflow');
+    /* ---------------- Core ---------------- */
+
+    push(item) {
+        this._ensureUnlocked();
+
+        if (this.isFull()) {
+            throw new Error("Stack overflow");
+        }
+
+        this.items.push(item);
+        return this.size();
     }
-    return this.items.pop();
-  }
 
-  peek() {
-    return this.isEmpty() ? null : this.items[this.items.length - 1];
-  }
+    pushMany(...items) {
+        this._ensureUnlocked();
 
-  clear() {
-    this.items.length = 0;
-  }
+        if (this.size() + items.length > this.maxSize) {
+            throw new Error("Stack overflow");
+        }
 
-  isEmpty() {
-    return this.items.length === 0;
-  }
-
-  size() {
-    return this.items.length;
-  }
-
-  toArray() {
-    return [...this.items];
-  }
-
-  *[Symbol.iterator]() {
-    for (let i = this.items.length - 1; i >= 0; i--) {
-      yield this.items[i];
+        this.items.push(...items);
+        return this.size();
     }
-  }
+
+    pop() {
+        this._ensureUnlocked();
+
+        if (this.isEmpty()) {
+            throw new Error("Stack underflow");
+        }
+
+        return this.items.pop();
+    }
+
+    popMany(count = 1) {
+        this._ensureUnlocked();
+
+        if (!Number.isInteger(count) || count < 0) {
+            throw new TypeError("Invalid count");
+        }
+
+        if (count > this.size()) {
+            throw new Error("Stack underflow");
+        }
+
+        return this.items.splice(-count).reverse();
+    }
+
+    peek(depth = 0) {
+        if (depth < 0 || depth >= this.size()) return null;
+        return this.items[this.items.length - 1 - depth];
+    }
+
+    clear() {
+        this._ensureUnlocked();
+        this.items.length = 0;
+        return this;
+    }
+
+    /* ---------------- Queries ---------------- */
+
+    isEmpty() {
+        return this.items.length === 0;
+    }
+
+    isFull() {
+        return this.size() >= this.maxSize;
+    }
+
+    size() {
+        return this.items.length;
+    }
+
+    capacity() {
+        return this.maxSize;
+    }
+
+    contains(value) {
+        return this.items.includes(value);
+    }
+
+    indexOf(value) {
+        return this.items.lastIndexOf(value);
+    }
+
+    /* ---------------- Utilities ---------------- */
+
+    clone() {
+        const copy = new Stack(this.maxSize);
+        copy.items = structuredClone(this.items);
+        return copy;
+    }
+
+    reverse() {
+        this._ensureUnlocked();
+        this.items.reverse();
+        return this;
+    }
+
+    freeze() {
+        this.locked = true;
+        Object.freeze(this.items);
+        return this;
+    }
+
+    unfreeze() {
+        if (Object.isFrozen(this.items)) {
+            this.items = [...this.items];
+        }
+        this.locked = false;
+        return this;
+    }
+
+    toArray() {
+        return [...this.items];
+    }
+
+    toJSON() {
+        return {
+            type: "Stack",
+            size: this.size(),
+            maxSize: this.maxSize,
+            items: this.toArray()
+        };
+    }
+
+    static from(iterable, maxSize = Infinity) {
+        const stack = new Stack(maxSize);
+        stack.pushMany(...iterable);
+        return stack;
+    }
+
+    /* ---------------- Iterator ---------------- */
+
+    *[Symbol.iterator]() {
+        for (let i = this.items.length - 1; i >= 0; i--) {
+            yield this.items[i];
+        }
+    }
+
+    /* ---------------- Internal ---------------- */
+
+    _ensureUnlocked() {
+        if (this.locked) {
+            throw new Error("Stack is locked");
+        }
+    }
 }
 
 /* =========================================================
