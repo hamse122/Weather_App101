@@ -86,28 +86,63 @@ class WebSocketManager {
     });
   }
 
-  /* -------------------- Heartbeat -------------------- */
+/* -------------------- Heartbeat -------------------- */
 
-  startHeartbeat() {
+startHeartbeat() {
     this.stopHeartbeat();
 
-    this.pingTimer = setInterval(() => {
-      if (!this.isConnected()) return;
+    if (!this.pingInterval || this.pingInterval <= 0) return;
 
-      this.send({ type: 'ping', ts: Date.now() });
+    const ping = () => {
+        if (!this.isConnected()) return;
 
-      this.pongTimer = setTimeout(() => {
-        this.socket?.close(4000, 'Pong timeout');
-      }, this.pongTimeout);
-    }, this.pingInterval);
-  }
+        this.clearPongTimeout();
 
-  stopHeartbeat() {
-    clearInterval(this.pingTimer);
-    clearTimeout(this.pongTimer);
-    this.pingTimer = null;
-    this.pongTimer = null;
-  }
+        try {
+            this.send({
+                type: "ping",
+                ts: Date.now()
+            });
+        } catch (error) {
+            this.stopHeartbeat();
+            this.onHeartbeatError?.(error);
+            return;
+        }
+
+        this.pongTimer = setTimeout(() => {
+            if (!this.isConnected()) return;
+
+            this.onHeartbeatTimeout?.();
+
+            try {
+                this.socket?.close(4000, "Pong timeout");
+            } catch (error) {
+                this.onHeartbeatError?.(error);
+            }
+        }, this.pongTimeout);
+    };
+
+    this.pingTimer = setInterval(ping, this.pingInterval);
+
+    // Send the first heartbeat immediately.
+    ping();
+}
+
+clearPongTimeout() {
+    if (this.pongTimer) {
+        clearTimeout(this.pongTimer);
+        this.pongTimer = null;
+    }
+}
+
+stopHeartbeat() {
+    if (this.pingTimer) {
+        clearInterval(this.pingTimer);
+        this.pingTimer = null;
+    }
+
+    this.clearPongTimeout();
+}
 
   /* -------------------- Reconnect -------------------- */
 
