@@ -53,32 +53,53 @@ class ReactiveStore {
     return JSON.parse(JSON.stringify(this.state));
   }
 
-  /* ---------------------------------- */
-  /* Subscriptions */
-  /* ---------------------------------- */
-  subscribe(key, callback) {
+/* ---------------------------------- */
+/* Subscriptions */
+/* ---------------------------------- */
+
+subscribe(key, callback) {
+    if (typeof key !== "string" || !key.trim()) {
+        throw new TypeError("Subscription key must be a non-empty string");
+    }
+
+    if (typeof callback !== "function") {
+        throw new TypeError("Subscription callback must be a function");
+    }
+
     if (!this._subscribers.has(key)) {
-      this._subscribers.set(key, new Set());
+        this._subscribers.set(key, new Set());
     }
 
-    this._subscribers.get(key).add(callback);
+    const subscribers = this._subscribers.get(key);
+    subscribers.add(callback);
 
-    return () => this.unsubscribe(key, callback);
-  }
+    let active = true;
 
-  subscribeAll(callback) {
-    return this.subscribe('*', callback);
-  }
+    return () => {
+        if (!active) return false;
+        active = false;
 
-  unsubscribe(key, callback) {
-    const set = this._subscribers.get(key);
-    if (!set) return;
+        return this.unsubscribe(key, callback);
+    };
+}
 
-    set.delete(callback);
-    if (set.size === 0) {
-      this._subscribers.delete(key);
+subscribeAll(callback) {
+    return this.subscribe("*", callback);
+}
+
+unsubscribe(key, callback) {
+    const subscribers = this._subscribers.get(key);
+
+    if (!subscribers) return false;
+
+    const removed = subscribers.delete(callback);
+
+    if (subscribers.size === 0) {
+        this._subscribers.delete(key);
     }
-  }
+
+    return removed;
+}
 
   /* ---------------------------------- */
   /* Computed Properties */
