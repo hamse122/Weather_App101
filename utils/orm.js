@@ -92,6 +92,10 @@ class ORM extends EventEmitter {
         const orm = this;
         const tableName = this.options.tablePrefix + (schema.tableName || `${name.toLowerCase()}s`);
 
+        if (!/^[a-zA-Z_][a-zA-Z0-9_.]*$/.test(tableName)) {
+            throw new Error(`Invalid table name: "${tableName}"`);
+        }
+
         class Model extends BaseModel {}
 
         Object.assign(Model, {
@@ -143,11 +147,7 @@ class ORM extends EventEmitter {
 
             const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
 
-            const sql = `
-                INSERT INTO ${Model.tableName} (${fields.join(", ")})
-                VALUES (${placeholders})
-                RETURNING *
-            `;
+            const sql = "INSERT INTO " + Model.tableName + " (" + fields.join(", ") + ") VALUES (" + placeholders + ") RETURNING *";
 
             return orm.db.query(async conn => {
                 const res = await conn.query(sql, values);
@@ -258,12 +258,7 @@ class ORM extends EventEmitter {
             const fields = Object.keys(data);
             const values = Object.values(data);
 
-            const sql = `
-                UPDATE ${Model.tableName}
-                SET ${fields.map((f, i) => `${f}=$${i + 1}`).join(", ")}
-                WHERE ${Model.primaryKey}=$${fields.length + 1}
-                RETURNING *
-            `;
+            const sql = "UPDATE " + Model.tableName + " SET " + fields.map((f, i) => f + "=$" + (i + 1)).join(", ") + " WHERE " + Model.primaryKey + "=$" + (fields.length + 1) + " RETURNING *";
 
             return orm.db.query(async c => {
                 const r = await c.query(sql, [...values, id]);
@@ -278,11 +273,7 @@ class ORM extends EventEmitter {
         // ------------------------------
         Model.destroy = async (id, config = {}) => {
             if (Model.softDelete) {
-                const sql = `
-                    UPDATE ${Model.tableName}
-                    SET deletedAt = NOW()
-                    WHERE ${Model.primaryKey} = $1
-                `;
+                const sql = "UPDATE " + Model.tableName + " SET deletedAt = NOW() WHERE " + Model.primaryKey + " = $1";
                 return orm.db.query(async c => {
                     await c.query(sql, [id]);
                     orm.emit("destroyed", { model: Model.modelName, id, soft: true });
@@ -294,10 +285,7 @@ class ORM extends EventEmitter {
         };
 
         Model.forceDelete = async (id, config = {}) => {
-            const sql = `
-                DELETE FROM ${Model.tableName}
-                WHERE ${Model.primaryKey} = $1
-            `;
+            const sql = "DELETE FROM " + Model.tableName + " WHERE " + Model.primaryKey + " = $1";
             return orm.db.query(async c => {
                 await c.query(sql, [id]);
                 orm.emit("destroyed", { model: Model.modelName, id, soft: false });
@@ -306,11 +294,7 @@ class ORM extends EventEmitter {
         };
 
         Model.restore = async (id, config = {}) => {
-            const sql = `
-                UPDATE ${Model.tableName}
-                SET deletedAt = NULL
-                WHERE ${Model.primaryKey} = $1
-            `;
+            const sql = "UPDATE " + Model.tableName + " SET deletedAt = NULL WHERE " + Model.primaryKey + " = $1";
             return orm.db.query(async c => {
                 await c.query(sql, [id]);
                 orm.emit("restored", { model: Model.modelName, id });
