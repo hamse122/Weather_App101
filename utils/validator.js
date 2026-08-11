@@ -59,29 +59,67 @@ class Validator {
         this.transforms.get(field).push(transformFn);
     }
 
-    /* =========================
-       LOAD ADVANCED SCHEMA
-    ========================= */
-    loadSchema(schema) {
-        for (const field in schema) {
-            const config = schema[field];
+/* =========================
+   LOAD ADVANCED SCHEMA
+========================= */
+loadSchema(schema = {}) {
+    if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+        throw new TypeError("Schema must be a plain object");
+    }
 
-            if (config.rules) {
-                this.addRules(field, config.rules);
-            }
+    for (const [field, config] of Object.entries(schema)) {
+        if (!config || typeof config !== "object") {
+            throw new TypeError(`Invalid schema configuration for "${field}"`);
+        }
 
-            if (config.transform) {
-                const transforms = Array.isArray(config.transform)
-                    ? config.transform
-                    : [config.transform];
-                transforms.forEach(t => this.addTransform(field, t));
-            }
+        // Multiple validation rules
+        if (config.rules) {
+            const rules = Array.isArray(config.rules)
+                ? config.rules
+                : [config.rules];
 
-            if (config.validate) {
-                this.addRule(field, config.validate);
+            for (const rule of rules) {
+                if (typeof rule !== "function") {
+                    throw new TypeError(
+                        `Invalid rule for field "${field}"`
+                    );
+                }
+
+                this.addRules(field, rule);
             }
         }
+
+        // Field transforms
+        if (config.transform) {
+            const transforms = Array.isArray(config.transform)
+                ? config.transform
+                : [config.transform];
+
+            for (const transform of transforms) {
+                if (typeof transform !== "function") {
+                    throw new TypeError(
+                        `Invalid transform for field "${field}"`
+                    );
+                }
+
+                this.addTransform(field, transform);
+            }
+        }
+
+        // Single validation rule
+        if (config.validate) {
+            if (typeof config.validate !== "function") {
+                throw new TypeError(
+                    `Invalid validator for field "${field}"`
+                );
+            }
+
+            this.addRule(field, config.validate);
+        }
     }
+
+    return this;
+}
 
     /* =========================
        MAIN VALIDATION ENGINE
