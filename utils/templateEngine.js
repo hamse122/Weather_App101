@@ -64,32 +64,34 @@ export class TemplateEngine {
             return this.render(partials[name], data, helpers, partials);
         });
 
-        /* =========================
-           EACH LOOP
-        ========================== */
-        result = result.replace(
-            /\{\{#each\s+([\w.[\]]+)\}\}([\s\S]*?)\{\{\/each\}\}/g,
-            (_, path, block) => {
+/* =========================
+   EACH LOOP
+========================= */
+result = result.replace(
+    /\{\{#each\s+([\w.[\]@-]+)\}\}([\s\S]*?)\{\{\/each\}\}/g,
+    (_, path, block) => {
+        const collection = this.resolvePath(data, path);
 
-                const array = this.resolvePath(data, path);
-                if (!Array.isArray(array)) return "";
+        if (!Array.isArray(collection) || collection.length === 0) {
+            return "";
+        }
 
-                return array.map((item, index) => {
+        return collection
+            .map((item, index) => {
+                const context = {
+                    ...data,
+                    ...(item && typeof item === "object" ? item : { value: item }),
+                    "@index": index,
+                    "@first": index === 0,
+                    "@last": index === collection.length - 1,
+                    "@key": index
+                };
 
-                    const context = {
-                        ...data,
-                        ...item,
-                        "@index": index,
-                        "@first": index === 0,
-                        "@last": index === array.length - 1
-                    };
-
-                    return this.render(block, context, helpers, partials);
-
-                }).join("");
-            }
-        );
-
+                return this.render(block, context, helpers, partials);
+            })
+            .join("");
+    }
+);
         /* =========================
            IF / ELSE
         ========================== */
