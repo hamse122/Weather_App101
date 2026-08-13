@@ -2,7 +2,7 @@ const EventEmitter = require("events");
 
 class BaseModel {
     constructor(attrs = {}, options = {}) {
-        this.$exists = !!options.exists;
+        this.$exists = Boolean(options.exists);
         this.$orm = options.orm;
         this.$model = options.model;
 
@@ -10,30 +10,46 @@ class BaseModel {
     }
 
     toJSON() {
-        const hidden = this.$model.hidden || [];
+        const hidden = this.$model?.hidden ?? [];
+
         return Object.fromEntries(
-            Object.entries(this).filter(([k]) => !k.startsWith("$") && !hidden.includes(k))
+            Object.entries(this).filter(
+                ([key]) => !key.startsWith("$") && !hidden.includes(key)
+            )
         );
     }
 
     async save(config = {}) {
-        return this.$exists ? this._update(config) : this._create(config);
+        return this.$exists
+            ? this._update(config)
+            : this._create(config);
     }
 
-    async _create(config) {
+    async _create(config = {}) {
         const created = await this.$model.create(this.toJSON(), config);
-        Object.assign(this, created);
-        this.$exists = true;
+
+        if (created) {
+            Object.assign(this, created);
+            this.$exists = true;
+        }
+
         return this;
     }
 
-    async _update(config) {
-        const updated = await this.$model.update(
-            this[this.$model.primaryKey],
-            this.toJSON(), 
-            config
-        );
-        Object.assign(this, updated);
+    async _update(config = {}) {
+        const primaryKey = this.$model.primaryKey;
+        const id = this[primaryKey];
+
+        if (id == null) {
+            throw new Error(`Cannot update ${this.$model.modelName}: missing ${primaryKey}`);
+        }
+
+        const updated = await this.$model.update(id, this.toJSON(), config);
+
+        if (updated) {
+            Object.assign(this, updated);
+        }
+
         return this;
     }
 
@@ -50,11 +66,22 @@ class BaseModel {
     }
 
     async reload(config = {}) {
-        const fresh = await this.$model.findById(
-            this[this.$model.primaryKey],
-            config
-        );
+        const id = this[this.$model.primaryKey];
+
+        if (id == null) {
+            throw new Error(`Cannot reload ${this.$model.modelName}: missing primary key`);
+        }
+
+        const fresh = await this.$model.findById(id, config);
+
+        if (!fresh) {
+            this.$exists = false;
+            return null;
+        }
+
         Object.assign(this, fresh);
+        this.$exists = true;
+
         return this;
     }
 }
@@ -62,6 +89,10 @@ class BaseModel {
 class ORM extends EventEmitter {
     constructor(databaseManager, options = {}) {
         super();
+
+        if (!databaseManager) {
+            throw new TypeError("A database manager is required.");
+        }
 
         this.db = databaseManager;
         this.models = new Map();
@@ -72,25 +103,30 @@ class ORM extends EventEmitter {
             timestampFields: true,
             paranoid: true,
             globalScopes: {},
-            ...options,
+            ...options
         };
 
         this.applyGlobalScopes = this.applyGlobalScopes.bind(this);
     }
 
-    // =====================================================================
-    // TRANSACTIONS
-    // =====================================================================
     async transaction(fn) {
+        if (typeof this.db.transaction !== "function") {
+            throw new Error("Database manager does not support transactions.");
+        }
+
         return this.db.transaction(fn);
     }
 
-    // =====================================================================
-    // MODEL DEFINITION
-    // =====================================================================
-    defineModel(name, schema) {
+    defineModel(name, schema = {}) {
+        if (!name || typeof name !== "string") {
+            throw new TypeError("Model name must be a non-empty string.");
+        }
+
         const orm = this;
-        const tableName = this.options.tablePrefix + (schema.tableName || `${name.toLowerCase()}s`);
+
+        const tableName =
+            this.options.tablePrefix +
+            (schema.tableName || `${name.toLowerCase()}s`);
 
         class Model extends BaseModel {}
 
@@ -101,7 +137,7 @@ class ORM extends EventEmitter {
             relationships: schema.relationships || {},
             primaryKey: schema.primaryKey || "id",
             hidden: schema.hidden || [],
-            fillable: schema.fillable || null,
+            fillable: schema.fillable ?? null,
             softDelete: schema.softDelete ?? this.options.paranoid,
             hooks: schema.hooks || {},
             orm
@@ -109,42 +145,57 @@ class ORM extends EventEmitter {
 
         this._attachModelMethods(Model);
         this.models.set(name, Model);
+
         return Model;
     }
 
-    // =====================================================================
-    // MODEL STATIC METHODS
-    // =====================================================================
     _attachModelMethods(Model) {
         const orm = this;
 
         const wrap = (row, exists = true) =>
-            row ? new Model(row, { orm, model: Model, exists }) : null;
+            row
+                ? new Model(row, {
+                      orm,
+                      model: Model,
+                      exists
+                  })
+                : null;
 
-        const addHook = async (hook, payload) => {
-            if (Model.hooks?.[hook]) await Model.hooks[hook](payload);
+        const addHook = async (hook, payload, config = {}) => {
+            const handler = Model.hooks?.[hook];
+
+            if (typeof handler === "function") {
+                await handler(payload, {
+                    model: Model,
+                    orm,
+                    ...config
+                });
+            }
         };
 
-        // ------------------------------
-        // QUERY BUILDER STARTER
-        // ------------------------------
-        Model.query = () => orm.db.createQueryBuilder().table(Model.tableName);
+        Model.query = () =>
+            orm.db.createQueryBuilder().table(Model.tableName);
 
-        // ------------------------------
-        // CREATE
-        // ------------------------------
         Model.create = async (attrs = {}, config = {}) => {
             const data = orm._prepareAttributes(Model, attrs, true);
 
-            await addHook("beforeCreate", data);
+            await addHook("beforeCreate", data, config);
 
-            let fields = Object.keys(data);
-            let values = Object.values(data);
+            const fields = Object.keys(data);
 
-            const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
+            if (!fields.length) {
+                throw new Error(`No attributes supplied for ${Model.modelName}`);
+            }
+
+            const values = Object.values(data);
+
+            const placeholders = fields
+                .map((_, i) => `$${i + 1}`)
+                .join(", ");
 
             const sql = `
-                INSERT INTO ${Model.tableName} (${fields.join(", ")})
+                INSERT INTO ${Model.tableName}
+                (${fields.join(", ")})
                 VALUES (${placeholders})
                 RETURNING *
             `;
@@ -152,31 +203,33 @@ class ORM extends EventEmitter {
             return orm.db.query(async conn => {
                 const res = await conn.query(sql, values);
                 const instance = wrap(res.rows[0]);
-                orm.emit("created", { model: Model.modelName, instance });
-                await addHook("afterCreate", instance);
+
+                await addHook("afterCreate", instance, config);
+
+                orm.emit("created", {
+                    model: Model.modelName,
+                    instance
+                });
+
                 return instance;
             }, config);
         };
 
-        // ------------------------------
-        // FIND BY ID
-        // ------------------------------
         Model.findById = async (id, config = {}) => {
-            const qb = Model.query().where({ [Model.primaryKey]: id }).limit(1);
+            const qb = Model.query()
+                .where({ [Model.primaryKey]: id })
+                .limit(1);
 
             orm.applyGlobalScopes(Model, qb);
 
             const sql = qb.build();
 
-            return orm.db.query(async c => {
-                const r = await c.query(sql, qb.getParams());
-                return wrap(r.rows[0]);
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, qb.getParams());
+                return wrap(result.rows[0]);
             }, config);
         };
 
-        // ------------------------------
-        // FIND ONE
-        // ------------------------------
         Model.findOne = async (where = {}, config = {}) => {
             const qb = Model.query().where(where).limit(1);
 
@@ -184,58 +237,76 @@ class ORM extends EventEmitter {
 
             const sql = qb.build();
 
-            return orm.db.query(async c => {
-                const r = await c.query(sql, qb.getParams());
-                return wrap(r.rows[0]);
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, qb.getParams());
+                return wrap(result.rows[0]);
             }, config);
         };
 
-        // ------------------------------
-        // FIND ALL
-        // ------------------------------
         Model.findAll = async (opts = {}, config = {}) => {
             const qb = Model.query();
 
             if (opts.fields) qb.select(opts.fields);
             if (opts.where) qb.where(opts.where);
             if (opts.whereIn) qb.whereIn(opts.whereIn);
-            if (opts.orderBy) qb.orderBy(...opts.orderBy.split(" "));
-            if (opts.limit) qb.limit(opts.limit);
-            if (opts.offset) qb.offset(opts.offset);
+
+            if (opts.orderBy) {
+                const order = String(opts.orderBy).trim().split(/\s+/);
+
+                const column = order[0];
+                const direction =
+                    order[1]?.toUpperCase() === "DESC"
+                        ? "DESC"
+                        : "ASC";
+
+                qb.orderBy(column, direction);
+            }
+
+            if (opts.limit != null) qb.limit(Number(opts.limit));
+            if (opts.offset != null) qb.offset(Number(opts.offset));
 
             orm.applyGlobalScopes(Model, qb);
 
             const sql = qb.build();
 
-            return orm.db.query(async c => {
-                const r = await c.query(sql, qb.getParams());
-                return r.rows.map(row => wrap(row));
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, qb.getParams());
+                return result.rows.map(row => wrap(row));
             }, config);
         };
 
-        // ------------------------------
-        // COUNT
-        // ------------------------------
         Model.count = async (where = {}, config = {}) => {
             const qb = Model.query().count("*").where(where);
 
             orm.applyGlobalScopes(Model, qb);
 
             const sql = qb.build();
-            return orm.db.query(async c => {
-                const r = await c.query(sql, qb.getParams());
-                return parseInt(r.rows[0].count, 10);
+
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, qb.getParams());
+                return Number(result.rows[0]?.count ?? 0);
             }, config);
         };
 
-        // ------------------------------
-        // PAGINATE
-        // ------------------------------
-        Model.paginate = async ({ page = 1, limit = 10, where = {} } = {}, config = {}) => {
+        Model.paginate = async (
+            { page = 1, limit = 10, where = {}, ...options } = {},
+            config = {}
+        ) => {
+            page = Math.max(1, Number(page));
+            limit = Math.max(1, Number(limit));
+
             const offset = (page - 1) * limit;
 
             const [rows, total] = await Promise.all([
-                Model.findAll({ where, limit, offset }, config),
+                Model.findAll(
+                    {
+                        ...options,
+                        where,
+                        limit,
+                        offset
+                    },
+                    config
+                ),
                 Model.count(where, config)
             ]);
 
@@ -243,49 +314,82 @@ class ORM extends EventEmitter {
                 rows,
                 total,
                 page,
+                limit,
                 pages: Math.ceil(total / limit)
             };
         };
 
-        // ------------------------------
-        // UPDATE
-        // ------------------------------
         Model.update = async (id, attrs = {}, config = {}) => {
-            const data = orm._prepareAttributes(Model, attrs);
-
-            if (!Object.keys(data).length) return null;
-
+            const data = orm._prepareAttributes(Model, attrs, false);
             const fields = Object.keys(data);
+
+            if (!fields.length) {
+                return Model.findById(id, config);
+            }
+
+            await addHook("beforeUpdate", {
+                id,
+                data
+            }, config);
+
             const values = Object.values(data);
+
+            const assignments = fields
+                .map((field, i) => `${field}=$${i + 1}`)
+                .join(", ");
 
             const sql = `
                 UPDATE ${Model.tableName}
-                SET ${fields.map((f, i) => `${f}=$${i + 1}`).join(", ")}
+                SET ${assignments}
                 WHERE ${Model.primaryKey}=$${fields.length + 1}
                 RETURNING *
             `;
 
-            return orm.db.query(async c => {
-                const r = await c.query(sql, [...values, id]);
-                const instance = wrap(r.rows[0]);
-                orm.emit("updated", { model: Model.modelName, instance });
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, [...values, id]);
+                const instance = wrap(result.rows[0]);
+
+                if (instance) {
+                    await addHook("afterUpdate", instance, config);
+
+                    orm.emit("updated", {
+                        model: Model.modelName,
+                        instance
+                    });
+                }
+
                 return instance;
             }, config);
         };
 
-        // ------------------------------
-        // SOFT DELETE / HARD DELETE
-        // ------------------------------
         Model.destroy = async (id, config = {}) => {
             if (Model.softDelete) {
+                await addHook("beforeDestroy", { id }, config);
+
                 const sql = `
                     UPDATE ${Model.tableName}
                     SET deletedAt = NOW()
                     WHERE ${Model.primaryKey} = $1
+                    RETURNING *
                 `;
-                return orm.db.query(async c => {
-                    await c.query(sql, [id]);
-                    orm.emit("destroyed", { model: Model.modelName, id, soft: true });
+
+                return orm.db.query(async conn => {
+                    const result = await conn.query(sql, [id]);
+
+                    if (!result.rowCount) return false;
+
+                    await addHook(
+                        "afterDestroy",
+                        { id, soft: true },
+                        config
+                    );
+
+                    orm.emit("destroyed", {
+                        model: Model.modelName,
+                        id,
+                        soft: true
+                    });
+
                     return true;
                 }, config);
             }
@@ -294,108 +398,186 @@ class ORM extends EventEmitter {
         };
 
         Model.forceDelete = async (id, config = {}) => {
+            await addHook("beforeForceDelete", { id }, config);
+
             const sql = `
                 DELETE FROM ${Model.tableName}
                 WHERE ${Model.primaryKey} = $1
             `;
-            return orm.db.query(async c => {
-                await c.query(sql, [id]);
-                orm.emit("destroyed", { model: Model.modelName, id, soft: false });
+
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, [id]);
+
+                if (!result.rowCount) return false;
+
+                await addHook(
+                    "afterForceDelete",
+                    { id },
+                    config
+                );
+
+                orm.emit("destroyed", {
+                    model: Model.modelName,
+                    id,
+                    soft: false
+                });
+
                 return true;
             }, config);
         };
 
         Model.restore = async (id, config = {}) => {
+            if (!Model.softDelete) {
+                return false;
+            }
+
+            await addHook("beforeRestore", { id }, config);
+
             const sql = `
                 UPDATE ${Model.tableName}
                 SET deletedAt = NULL
                 WHERE ${Model.primaryKey} = $1
             `;
-            return orm.db.query(async c => {
-                await c.query(sql, [id]);
-                orm.emit("restored", { model: Model.modelName, id });
+
+            return orm.db.query(async conn => {
+                const result = await conn.query(sql, [id]);
+
+                if (!result.rowCount) return false;
+
+                await addHook("afterRestore", { id }, config);
+
+                orm.emit("restored", {
+                    model: Model.modelName,
+                    id
+                });
+
                 return true;
             }, config);
         };
 
-        // ------------------------------
-        // RELATION LOADING
-        // ------------------------------
         Model.with = (...relations) => ({
             async load(instance) {
-                for (const relName of relations) {
-                    const rel = Model.relationships[relName];
-                    if (!rel) continue;
+                if (!instance) return instance;
 
-                    const Related = orm.models.get(rel.model);
-                    if (!Related) continue;
+                for (const relationName of relations) {
+                    const relation =
+                        Model.relationships?.[relationName];
 
-                    if (rel.type === "hasMany") {
-                        instance[relName] = await Related.findAll({
-                            where: { [rel.foreignKey]: instance[rel.localKey || "id"] }
-                        });
+                    if (!relation) continue;
+
+                    const Related = orm.models.get(relation.model);
+
+                    if (!Related) {
+                        throw new Error(
+                            `Related model '${relation.model}' not found.`
+                        );
                     }
 
-                    if (rel.type === "belongsTo") {
-                        instance[relName] = await Related.findById(instance[rel.foreignKey]);
+                    if (relation.type === "hasMany") {
+                        const localKey =
+                            relation.localKey || Model.primaryKey;
+
+                        instance[relationName] =
+                            await Related.findAll({
+                                where: {
+                                    [relation.foreignKey]:
+                                        instance[localKey]
+                                }
+                            });
+                    }
+
+                    if (relation.type === "belongsTo") {
+                        instance[relationName] =
+                            await Related.findById(
+                                instance[relation.foreignKey]
+                            );
                     }
                 }
+
                 return instance;
             }
         });
     }
 
-    // =====================================================================
-    // HELPERS
-    // =====================================================================
-    _prepareAttributes(Model, attrs, isCreate = false) {
-        const now = new Date();
+    _prepareAttributes(Model, attrs = {}, isCreate = false) {
         let data = { ...attrs };
 
         if (Model.fillable) {
+            const allowed = new Set(Model.fillable);
+
             data = Object.fromEntries(
-                Object.entries(data).filter(([k]) => Model.fillable.includes(k))
+                Object.entries(data).filter(([key]) =>
+                    allowed.has(key)
+                )
             );
         }
 
         if (this.options.timestampFields) {
-            if (isCreate) data.createdAt = now;
+            const now = new Date();
+
+            if (isCreate && data.createdAt == null) {
+                data.createdAt = now;
+            }
+
             data.updatedAt = now;
         }
 
         return data;
     }
 
-    // =====================================================================
-    // GLOBAL SCOPES (Soft delete, custom scopes, etc.)
-    // =====================================================================
     applyGlobalScopes(Model, qb) {
-        if (Model.softDelete) qb.where({ deletedAt: null });
+        if (Model.softDelete) {
+            qb.where({ deletedAt: null });
+        }
 
-        for (const scopeName in this.options.globalScopes) {
-            this.options.globalScopes[scopeName](qb);
+        for (const scope of Object.values(
+            this.options.globalScopes || {}
+        )) {
+            if (typeof scope === "function") {
+                scope(qb, Model);
+            }
         }
     }
 
-    // =====================================================================
-    // MIGRATIONS
-    // =====================================================================
-    addMigration(m) {
-        this.migrations.push(m);
+    addMigration(migration) {
+        if (
+            !migration ||
+            typeof migration.up !== "function" ||
+            typeof migration.down !== "function"
+        ) {
+            throw new TypeError(
+                "Migration must provide up() and down() functions."
+            );
+        }
+
+        this.migrations.push(migration);
         return this;
     }
 
     async migrate(config = {}) {
-        for (const m of this.migrations) {
-            await this.db.query(c => m.up(c), config);
+        for (const migration of this.migrations) {
+            await this.db.query(
+                connection => migration.up(connection),
+                config
+            );
         }
+
+        return this;
     }
 
     async rollback(config = {}) {
-        for (const m of [...this.migrations].reverse()) {
-            await this.db.query(c => m.down(c), config);
+        for (const migration of [...this.migrations].reverse()) {
+            await this.db.query(
+                connection => migration.down(connection),
+                config
+            );
         }
+
+        return this;
     }
 }
 
-module.exports = { ORM, BaseModel };
+module.exports = {
+    ORM,
+    BaseModel
+};
