@@ -48,26 +48,111 @@ export function isValidPhone(
 /* ---------------------------------- */
 /* Password Validation */
 /* ---------------------------------- */
-export function isValidPassword(
+export function validatePassword(
   password,
   {
     minLength = 8,
+    maxLength = 128,
     requireUppercase = true,
     requireLowercase = true,
     requireNumber = true,
-    requireSpecial = false
+    requireSpecial = false,
+    specialCharacters = /[!@#$%^&*(),.?":{}|<>_\-+=\[\]\\\/;`~]/
   } = {}
 ) {
-  if (typeof password !== 'string') return false;
-  if (password.length < minLength) return false;
+  const errors = [];
 
-  if (requireUppercase && !/[A-Z]/.test(password)) return false;
-  if (requireLowercase && !/[a-z]/.test(password)) return false;
-  if (requireNumber && !/\d/.test(password)) return false;
-  if (requireSpecial && !/[!@#$%^&*(),.?":{}|<>]/.test(password)) return false;
+  if (typeof password !== "string") {
+    return { valid: false, errors: ["Password must be a string"] };
+  }
 
-  return true;
+  if (password.length < minLength) {
+    errors.push(`Password must be at least ${minLength} characters`);
+  }
+
+  if (maxLength > 0 && password.length > maxLength) {
+    errors.push(`Password must not exceed ${maxLength} characters`);
+  }
+
+  if (requireUppercase && !/[A-Z]/.test(password)) {
+    errors.push("Password must contain an uppercase letter");
+  }
+
+  if (requireLowercase && !/[a-z]/.test(password)) {
+    errors.push("Password must contain a lowercase letter");
+  }
+
+  if (requireNumber && !/\d/.test(password)) {
+    errors.push("Password must contain a number");
+  }
+
+  if (requireSpecial && !specialCharacters.test(password)) {
+    errors.push("Password must contain a special character");
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    strength: getPasswordStrength(password)
+  };
 }
+
+export function isValidPassword(password, options = {}) {
+  return validatePassword(password, options).valid;
+}
+
+function getPasswordStrength(password) {
+  if (typeof password !== "string" || !password) return "none";
+
+  let score = 0;
+
+  if (password.length >= 8) score++;
+  if (password.length >= 12) score++;
+  if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score++;
+  if (/\d/.test(password)) score++;
+  if (/[!@#$%^&*(),.?":{}|<>_\-+=\[\]\\\/;`~]/.test(password)) score++;
+
+  if (score <= 1) return "weak";
+  if (score <= 3) return "medium";
+  if (score === 4) return "strong";
+  return "very-strong";
+}
+
+async rollback(config = {}) {
+    const migrations = [...this.migrations]
+        .filter(migration => typeof migration?.down === "function")
+        .reverse();
+
+    const results = [];
+
+    for (const migration of migrations) {
+        try {
+            await this.db.query(
+                connection => migration.down(connection),
+                config
+            );
+
+            results.push({
+                name: migration.name ?? "anonymous",
+                success: true
+            });
+        } catch (error) {
+            const migrationName = migration.name ?? "anonymous";
+
+            error.message =
+                `Rollback failed for migration "${migrationName}": ${error.message}`;
+
+            error.rollbackResults = results;
+
+            throw error;
+        }
+    }
+
+    return results;
+}
+}
+
+module.exports = { ORM, BaseModel };
 
 /* ---------------------------------- */
 /* Empty Check */
