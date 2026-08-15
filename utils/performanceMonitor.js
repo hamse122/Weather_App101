@@ -316,47 +316,62 @@ export class PerformanceMonitor {
  * 🚀 Advanced Resource Monitoring (Optimized)
  */
 monitorResources(options = {}) {
-    if (typeof PerformanceObserver === "undefined") return;
+    if (typeof PerformanceObserver === "undefined") return null;
 
     const {
-        maxEntries = 200,          // prevent memory leaks
-        slowThreshold = 1000,     // ms
-        groupByType = true        // group resources by type
+        maxEntries = 200,
+        slowThreshold = 1000,
+        groupByType = true
     } = options;
 
-    const observer = new PerformanceObserver((list) => {
-        list.getEntries().forEach((entry) => {
+    const limit = Math.max(1, Number(maxEntries) || 200);
+    const threshold = Math.max(0, Number(slowThreshold) || 0);
+
+    const observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) {
             const type = entry.initiatorType || "other";
-            const key = groupByType ? type : this._normalizeName(entry.name);
+            const key = groupByType
+                ? type
+                : this._normalizeName(entry.name);
 
             if (!this.metrics.has(key)) {
                 this.metrics.set(key, []);
             }
 
-            const resourceData = {
-                name: this._shortName(entry.name),
-                duration: entry.duration,
-                size: entry.transferSize || 0,
-                start: entry.startTime,
-                slow: entry.duration > slowThreshold
-            };
-
             const bucket = this.metrics.get(key);
 
-            // limit memory usage
-            if (bucket.length >= maxEntries) {
-                bucket.shift();
-            }
+            bucket.push({
+                name: this._shortName(entry.name),
+                duration: Number(entry.duration) || 0,
+                size: Number(entry.transferSize) || 0,
+                start: Number(entry.startTime) || 0,
+                slow: entry.duration > threshold
+            });
 
-            bucket.push(resourceData);
-        });
+            // Keep memory usage bounded.
+            if (bucket.length > limit) {
+                bucket.splice(0, bucket.length - limit);
+            }
+        }
     });
 
     try {
-        observer.observe({ entryTypes: ["resource"] });
+        observer.observe({ type: "resource", buffered: true });
+        this.observers ??= [];
         this.observers.push(observer);
-    } catch (err) {
-        console.warn("Resource monitoring not supported:", err);
+
+        return observer;
+    } catch (error) {
+        console.warn(
+            "[ResourceMonitor] Resource monitoring is not supported:",
+            error
+        );
+
+        try {
+            observer.disconnect();
+        } catch {}
+
+        return null;
     }
 }
 
