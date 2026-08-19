@@ -13,6 +13,12 @@ function ensureArray(arr) {
   }
 }
 
+function ensureFunction(fn, name = "callback") {
+  if (typeof fn !== "function") {
+    throw new TypeError(`${name} must be a function`);
+  }
+}
+
 /* ---------------------------------- */
 /* Core Utilities */
 /* ---------------------------------- */
@@ -24,45 +30,61 @@ export function removeDuplicates(arr) {
 
 export function uniqueBy(arr, keyFn) {
   ensureArray(arr);
+  ensureFunction(keyFn, "keyFn");
+
   const seen = new Set();
-  return arr.filter(item => {
+  const result = [];
+
+  for (const item of arr) {
     const key = keyFn(item);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(item);
+    }
+  }
+
+  return result;
 }
 
 export function chunkArray(arr, size) {
   ensureArray(arr);
+
   if (!Number.isInteger(size) || size <= 0) {
-    throw new Error("Chunk size must be a positive integer.");
+    throw new RangeError("Chunk size must be a positive integer.");
   }
 
-  const length = arr.length;
-  if (!length) return [];
+  const chunks = new Array(Math.ceil(arr.length / size));
 
-  const chunks = new Array(Math.ceil(length / size));
-  for (let i = 0, j = 0; i < length; i += size, j++) {
-    chunks[j] = arr.slice(i, i + size);
+  for (let i = 0; i < arr.length; i += size) {
+    chunks[i / size] = arr.slice(i, i + size);
   }
+
   return chunks;
 }
 
 export function flattenArray(arr, depth = Infinity) {
   ensureArray(arr);
+
+  if (depth !== Infinity && (!Number.isInteger(depth) || depth < 0)) {
+    throw new RangeError("Depth must be a non-negative integer or Infinity.");
+  }
+
   if (depth === 0) return [...arr];
-  return arr.flat ? arr.flat(depth) : _flattenPolyfill(arr, depth);
+
+  return typeof arr.flat === "function"
+    ? arr.flat(depth)
+    : _flattenPolyfill(arr, depth);
 }
 
 function _flattenPolyfill(arr, depth, result = []) {
   for (const item of arr) {
     if (isArray(item) && depth > 0) {
-      _flattenPolyfill(item, depth - 1, result);
+      _flattenPolyfill(item, depth === Infinity ? Infinity : depth - 1, result);
     } else {
       result.push(item);
     }
   }
+
   return result;
 }
 
@@ -72,35 +94,40 @@ function _flattenPolyfill(arr, depth, result = []) {
 
 export function getRandomItem(arr) {
   ensureArray(arr);
-  const { length } = arr;
-  return length ? arr[(Math.random() * length) | 0] : undefined;
+  return arr.length
+    ? arr[Math.floor(Math.random() * arr.length)]
+    : undefined;
 }
 
 export function sampleArray(arr, count = 1) {
   ensureArray(arr);
-  if (count <= 0) return [];
-  if (count >= arr.length) return shuffleArray(arr);
 
-  const result = [];
-  const used = new Set();
-
-  while (result.length < count) {
-    const idx = (Math.random() * arr.length) | 0;
-    if (!used.has(idx)) {
-      used.add(idx);
-      result.push(arr[idx]);
-    }
+  if (!Number.isInteger(count)) {
+    throw new TypeError("Sample count must be an integer.");
   }
 
-  return result;
+  if (count <= 0 || arr.length === 0) return [];
+  if (count >= arr.length) return shuffleArray(arr);
+
+  const result = arr.slice();
+  const selected = [];
+
+  for (let i = 0; i < count; i++) {
+    const index = i + Math.floor(Math.random() * (result.length - i));
+    [result[i], result[index]] = [result[index], result[i]];
+    selected.push(result[i]);
+  }
+
+  return selected;
 }
 
 export function shuffleArray(arr) {
   ensureArray(arr);
-  const result = arr.slice();
+
+  const result = [...arr];
 
   for (let i = result.length - 1; i > 0; i--) {
-    const j = (Math.random() * (i + 1)) | 0;
+    const j = Math.floor(Math.random() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
 
@@ -118,11 +145,11 @@ export function compactArray(arr) {
 
 export function removeNullish(arr) {
   ensureArray(arr);
-  return arr.filter(v => v !== null && v !== undefined);
+  return arr.filter(value => value != null);
 }
 
 /* ---------------------------------- */
-/* Set Operations (Optimized) */
+/* Set Operations */
 /* ---------------------------------- */
 
 export function arrayDifference(arr1, arr2) {
@@ -143,7 +170,20 @@ export function arrayIntersection(arr1, arr2) {
 
 export function arrayUnion(...arrays) {
   arrays.forEach(ensureArray);
-  return [...new Set(arrays.flat())];
+
+  const result = [];
+  const seen = new Set();
+
+  for (const arr of arrays) {
+    for (const item of arr) {
+      if (!seen.has(item)) {
+        seen.add(item);
+        result.push(item);
+      }
+    }
+  }
+
+  return result;
 }
 
 /* ---------------------------------- */
@@ -152,21 +192,24 @@ export function arrayUnion(...arrays) {
 
 export function countOccurrences(arr) {
   ensureArray(arr);
+
   const map = new Map();
 
   for (const item of arr) {
     map.set(item, (map.get(item) || 0) + 1);
   }
 
-  return Object.fromEntries(map);
+  return map;
 }
 
 export function groupBy(arr, keyFn) {
   ensureArray(arr);
-  const result = {};
+  ensureFunction(keyFn, "keyFn");
+
+  const result = Object.create(null);
 
   for (const item of arr) {
-    const key = keyFn(item);
+    const key = String(keyFn(item));
     (result[key] ||= []).push(item);
   }
 
@@ -175,15 +218,26 @@ export function groupBy(arr, keyFn) {
 
 export function sortBy(arr, keyFn, order = "asc") {
   ensureArray(arr);
+  ensureFunction(keyFn, "keyFn");
+
+  if (order !== "asc" && order !== "desc") {
+    throw new Error('Order must be "asc" or "desc".');
+  }
+
   const multiplier = order === "desc" ? -1 : 1;
 
-  return arr.slice().sort((a, b) => {
-    const ka = keyFn(a);
-    const kb = keyFn(b);
-    if (ka > kb) return 1 * multiplier;
-    if (ka < kb) return -1 * multiplier;
-    return 0;
-  });
+  return arr
+    .map((value, index) => ({
+      value,
+      key: keyFn(value),
+      index
+    }))
+    .sort((a, b) => {
+      if (a.key > b.key) return multiplier;
+      if (a.key < b.key) return -multiplier;
+      return a.index - b.index;
+    })
+    .map(item => item.value);
 }
 
 /* ---------------------------------- */
@@ -202,21 +256,37 @@ export function last(arr) {
 
 export function take(arr, n = 1) {
   ensureArray(arr);
-  return arr.slice(0, Math.max(0, n));
+
+  if (!Number.isInteger(n)) {
+    throw new TypeError("Count must be an integer.");
+  }
+
+  return n <= 0 ? [] : arr.slice(0, n);
 }
 
 export function drop(arr, n = 1) {
   ensureArray(arr);
-  return arr.slice(Math.max(0, n));
+
+  if (!Number.isInteger(n)) {
+    throw new TypeError("Count must be an integer.");
+  }
+
+  return n <= 0 ? [...arr] : arr.slice(n);
 }
 
 export function partition(arr, predicate) {
   ensureArray(arr);
+  ensureFunction(predicate, "predicate");
+
   const truthy = [];
   const falsy = [];
 
   for (const item of arr) {
-    (predicate(item) ? truthy : falsy).push(item);
+    if (predicate(item)) {
+      truthy.push(item);
+    } else {
+      falsy.push(item);
+    }
   }
 
   return [truthy, falsy];
