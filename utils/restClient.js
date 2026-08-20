@@ -1,20 +1,22 @@
 class RestClient {
     constructor(baseURL = '', options = {}) {
         this.baseURL = baseURL.replace(/\/+$/, '');
-        this.fetchImpl = options.fetch || globalThis.fetch;
+        this.fetchImpl = options.fetch ?? globalThis.fetch;
 
-        if (!this.fetchImpl) {
+        if (typeof this.fetchImpl !== 'function') {
             throw new Error('Fetch implementation not available');
         }
 
-        this.defaultHeaders = this.normalizeHeaders(options.headers || {});
+        this.defaultHeaders = this.normalizeHeaders(options.headers);
         this.timeout = options.timeout ?? 10000;
 
         this.retry = {
-            attempts: options.retryAttempts ?? 0,
+            attempts: Math.max(0, options.retryAttempts ?? 0),
             baseDelay: options.retryDelay ?? 300,
             maxDelay: options.maxRetryDelay ?? 3000,
-            retryOn: options.retryOn ?? [408, 429, 500, 502, 503, 504],
+            retryOn: new Set(
+                options.retryOn ?? [408, 429, 500, 502, 503, 504]
+            ),
             retryFn: options.retryFn
         };
 
@@ -23,87 +25,110 @@ class RestClient {
         this.errorInterceptors = [];
 
         this.transformRequest =
-            options.transformRequest ?? (cfg => cfg);
+            options.transformRequest ?? (config => config);
 
         this.transformResponse =
-            options.transformResponse ?? (res => res);
+            options.transformResponse ?? (response => response);
     }
 
     useRequest(fn) {
+        if (typeof fn !== 'function') {
+            throw new TypeError('Request interceptor must be a function');
+        }
+
         this.requestInterceptors.push(fn);
         return this;
     }
 
     useResponse(fn) {
+        if (typeof fn !== 'function') {
+            throw new TypeError('Response interceptor must be a function');
+        }
+
         this.responseInterceptors.push(fn);
         return this;
     }
 
     useError(fn) {
+        if (typeof fn !== 'function') {
+            throw new TypeError('Error interceptor must be a function');
+        }
+
         this.errorInterceptors.push(fn);
         return this;
     }
 
     async request(endpoint, config = {}) {
         const timeout = config.timeout ?? this.timeout;
-
         const timeoutController = new AbortController();
 
-        const timeoutId = setTimeout(
-            () => timeoutController.abort(),
-            timeout
-        );
+        const timeoutId =
+            timeout > 0
+                ? setTimeout(() => timeoutController.abort(), timeout)
+                : null;
 
         const signal = this.mergeSignals(
             config.signal,
-            timeoutController.signal
+            timeout > 0 ? timeoutController.signal : null
         );
 
         let requestConfig = {
-            method: config.method || 'GET',
+            ...config,
+            method: String(config.method ?? 'GET').toUpperCase(),
             headers: this.normalizeHeaders({
                 ...this.defaultHeaders,
-                ...config.headers
+                ...(config.headers ?? {})
             }),
-            body: config.body,
             signal
         };
 
-        requestConfig = this.transformRequest(requestConfig);
+        requestConfig = await this.transformRequest(requestConfig);
 
         const url = this.buildURL(endpoint, config.params);
 
         for (const interceptor of this.requestInterceptors) {
             requestConfig =
-                (await interceptor(requestConfig, url)) ||
+                (await interceptor(requestConfig, url)) ??
                 requestConfig;
         }
 
         const execute = async (attempt = 0) => {
-            const start = performance.now();
+            const startedAt =
+                typeof performance !== 'undefined'
+                    ? performance.now()
+                    : Date.now();
 
             try {
-                let response = await this.fetchImpl(
+                const response = await this.fetchImpl(
                     url,
                     requestConfig
                 );
 
-                response.duration =
-                    performance.now() - start;
+                const endedAt =
+                    typeof performance !== 'undefined'
+                        ? performance.now()
+                        : Date.now();
+
+                const duration = endedAt - startedAt;
+
+                let processedResponse = response;
 
                 for (const interceptor of this.responseInterceptors) {
-                    response =
-                        (await interceptor(response.clone())) ||
-                        response;
+                    processedResponse =
+                        (await interceptor(
+                            processedResponse.clone()
+                        )) ?? processedResponse;
                 }
 
-                if (!response.ok) {
+                if (!processedResponse.ok) {
                     const error =
-                        await this.createHttpError(response);
+                        await this.createHttpError(processedResponse);
+
+                    error.duration = duration;
 
                     if (
-                        this.shouldRetry(
-                            response.status,
+                        await this.shouldRetry(
+                            processedResponse.status,
                             attempt,
                             error
                         )
@@ -115,18 +140,26 @@ class RestClient {
                     throw error;
                 }
 
-                return this.transformResponse(
-                    await this.parseResponse(response)
-                );
+                const result =
+                    await this.parseResponse(processedResponse);
+
+                return this.transformResponse(result, {
+                    response: processedResponse,
+                    url,
+                    duration,
+                    attempt
+                });
             } catch (err) {
+                let error = err;
+
                 for (const interceptor of this.errorInterceptors) {
-                    err =
-                        (await interceptor(err)) || err;
+                    error =
+                        (await interceptor(error)) ?? error;
                 }
 
                 if (
-                    this.shouldRetry(
-                        err,
+                    await this.shouldRetry(
+                        error,
                         attempt
                     )
                 ) {
@@ -134,14 +167,14 @@ class RestClient {
                     return execute(attempt + 1);
                 }
 
-                throw err;
+                throw error;
             }
         };
 
         try {
             return await execute();
         } finally {
-            clearTimeout(timeoutId);
+            if (timeoutId) clearTimeout(timeoutId);
         }
     }
 
@@ -149,15 +182,36 @@ class RestClient {
         const url = /^https?:\/\//i.test(endpoint)
             ? new URL(endpoint)
             : new URL(
-                  `${this.baseURL}/${endpoint.replace(/^\/+/, '')}`
+                  `${this.baseURL}/${String(endpoint).replace(/^\/+/, '')}`
               );
 
-        if (params) {
-            Object.entries(params).forEach(([k, v]) => {
-                if (v !== undefined && v !== null) {
-                    url.searchParams.append(k, v);
+        if (params && typeof params === 'object') {
+            for (const [key, value] of Object.entries(params)) {
+                if (value === undefined || value === null) continue;
+
+                if (Array.isArray(value)) {
+                    value.forEach(v =>
+                        url.searchParams.append(key, String(v))
+                    );
+                } else if (value instanceof Date) {
+                    url.searchParams.append(
+                        key,
+                        value.toISOString()
+                    );
+                } else if (
+                    typeof value === 'object'
+                ) {
+                    url.searchParams.append(
+                        key,
+                        JSON.stringify(value)
+                    );
+                } else {
+                    url.searchParams.append(
+                        key,
+                        String(value)
+                    );
                 }
-            });
+            }
         }
 
         return url.toString();
@@ -166,23 +220,39 @@ class RestClient {
     normalizeHeaders(headers = {}) {
         const normalized = {};
 
-        for (const key in headers) {
-            normalized[key.toLowerCase()] = headers[key];
+        if (headers instanceof Headers) {
+            headers.forEach((value, key) => {
+                normalized[key.toLowerCase()] = value;
+            });
+
+            return normalized;
+        }
+
+        for (const [key, value] of Object.entries(headers)) {
+            if (value !== undefined && value !== null) {
+                normalized[key.toLowerCase()] = String(value);
+            }
         }
 
         return normalized;
     }
 
     mergeSignals(...signals) {
+        const validSignals = signals.filter(Boolean);
+
+        if (!validSignals.length) return undefined;
+
         const controller = new AbortController();
 
-        const abort = () => controller.abort();
-
-        for (const signal of signals) {
-            if (!signal) continue;
-
-            if (signal.aborted) {
+        const abort = () => {
+            if (!controller.signal.aborted) {
                 controller.abort();
+            }
+        };
+
+        for (const signal of validSignals) {
+            if (signal.aborted) {
+                abort();
                 break;
             }
 
@@ -196,24 +266,27 @@ class RestClient {
         return controller.signal;
     }
 
-    shouldRetry(reason, attempt, error) {
-        if (attempt >= this.retry.attempts)
+    async shouldRetry(reason, attempt, error) {
+        if (attempt >= this.retry.attempts) {
             return false;
+        }
 
         if (typeof this.retry.retryFn === 'function') {
-            return this.retry.retryFn(
-                reason,
-                attempt,
-                error
+            return Boolean(
+                await this.retry.retryFn(
+                    reason,
+                    attempt,
+                    error
+                )
             );
         }
 
         if (typeof reason === 'number') {
-            return this.retry.retryOn.includes(reason);
+            return this.retry.retryOn.has(reason);
         }
 
         if (reason?.name === 'AbortError') {
-            return true;
+            return false;
         }
 
         if (reason instanceof TypeError) {
@@ -224,28 +297,39 @@ class RestClient {
     }
 
     async backoff(attempt) {
-        const delay = Math.min(
+        const exponential = Math.min(
             this.retry.baseDelay * 2 ** attempt,
             this.retry.maxDelay
         );
 
-        const jitter = Math.random() * delay * 0.25;
+        const jitter = Math.random() * exponential * 0.25;
 
         await new Promise(resolve =>
-            setTimeout(resolve, delay + jitter)
+            setTimeout(
+                resolve,
+                exponential + jitter
+            )
         );
     }
 
     async parseResponse(response) {
+        if (response.status === 204 || response.status === 205) {
+            return null;
+        }
+
         const contentType =
-            response.headers.get('content-type') || '';
+            response.headers.get('content-type')?.toLowerCase() ?? '';
 
         if (contentType.includes('application/json')) {
             return response.json();
         }
 
         if (
-            contentType.includes('application/octet-stream')
+            contentType.includes('application/octet-stream') ||
+            contentType.includes('application/pdf') ||
+            contentType.startsWith('image/') ||
+            contentType.startsWith('audio/') ||
+            contentType.startsWith('video/')
         ) {
             return response.arrayBuffer();
         }
@@ -254,18 +338,19 @@ class RestClient {
     }
 
     async createHttpError(response) {
-        let data;
+        let data = null;
 
         try {
             data = await this.parseResponse(response);
         } catch {
-            data = null;
+            // Ignore response parsing failures.
         }
 
         const error = new Error(
-            `HTTP ${response.status} ${response.statusText}`
+            `HTTP ${response.status} ${response.statusText}`.trim()
         );
 
+        error.name = 'HttpError';
         error.status = response.status;
         error.statusText = response.statusText;
         error.data = data;
@@ -280,19 +365,22 @@ class RestClient {
         if (body == null) return undefined;
 
         const headers = this.normalizeHeaders(
-            config.headers || {}
+            config.headers ?? {}
         );
 
         if (
             typeof body === 'object' &&
             !(body instanceof FormData) &&
-            !(body instanceof Blob)
+            !(body instanceof Blob) &&
+            !(body instanceof ArrayBuffer) &&
+            !(body instanceof URLSearchParams)
         ) {
             if (!headers['content-type']) {
                 headers['content-type'] =
                     'application/json';
-                config.headers = headers;
             }
+
+            config.headers = headers;
 
             return JSON.stringify(body);
         }
@@ -300,7 +388,7 @@ class RestClient {
         return body;
     }
 
-    get(url, config) {
+    get(url, config = {}) {
         return this.request(url, {
             ...config,
             method: 'GET'
@@ -331,7 +419,7 @@ class RestClient {
         });
     }
 
-    delete(url, config) {
+    delete(url, config = {}) {
         return this.request(url, {
             ...config,
             method: 'DELETE'
