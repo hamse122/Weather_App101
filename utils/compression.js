@@ -17,6 +17,7 @@ export class Compression {
         return typeof CompressionStream !== "undefined";
     }
 
+    
     /* -------------------------------------------------------
        SAFE RLE (Binary-Safe + Digit-Safe)
     -------------------------------------------------------- */
