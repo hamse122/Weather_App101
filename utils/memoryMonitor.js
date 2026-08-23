@@ -228,30 +228,93 @@ export class MemoryMonitor {
         }, null, 2);
     }
 
-    // --------------------------------------------------
-    // Events
-    // --------------------------------------------------
+// --------------------------------------------------
+// Events
+// --------------------------------------------------
 
-    on(type, listener) {
+on(type, listener, { once = false, signal } = {}) {
+    if (typeof listener !== "function") {
+        throw new TypeError("Event listener must be a function");
+    }
+
+    if (!this.listeners[type]) {
+        throw new Error(`Unknown event: ${type}`);
+    }
+
+    if (signal?.aborted) {
+        return () => {};
+    }
+
+    const wrappedListener = once
+        ? (payload) => {
+            this.off(type, wrappedListener);
+            listener(payload);
+        }
+        : listener;
+
+    this.listeners[type].add(wrappedListener);
+
+    const unsubscribe = () => {
+        this.listeners[type]?.delete(wrappedListener);
+        signal?.removeEventListener?.("abort", unsubscribe);
+    };
+
+    signal?.addEventListener?.("abort", unsubscribe, { once: true });
+
+    return unsubscribe;
+}
+
+once(type, listener, options = {}) {
+    return this.on(type, listener, { ...options, once: true });
+}
+
+off(type, listener) {
+    return this.listeners[type]?.delete(listener) ?? false;
+}
+
+emit(type, payload) {
+    const listeners = this.listeners[type];
+    if (!listeners?.size) return false;
+
+    const errors = [];
+
+    // Copy listeners so changes during emission are safe
+    for (const listener of [...listeners]) {
+        try {
+            listener(payload);
+        } catch (error) {
+            errors.push(error);
+            console.error(`[MemoryMonitor] "${type}" listener error:`, error);
+        }
+    }
+
+    return {
+        emitted: true,
+        listeners: listeners.size,
+        errors
+    };
+}
+
+clearListeners(type = null) {
+    if (type) {
         if (!this.listeners[type]) {
             throw new Error(`Unknown event: ${type}`);
         }
-        this.listeners[type].add(listener);
-        return () => this.listeners[type].delete(listener);
+
+        this.listeners[type].clear();
+        return this;
     }
 
-    emit(type, payload) {
-        const set = this.listeners[type];
-        if (!set) return;
-
-        for (const fn of set) {
-            try {
-                fn(payload);
-            } catch (err) {
-                console.error(`[MemoryMonitor] listener error:`, err);
-            }
-        }
+    for (const listeners of Object.values(this.listeners)) {
+        listeners.clear();
     }
+
+    return this;
+}
+
+listenerCount(type) {
+    return this.listeners[type]?.size ?? 0;
+}
 
     // --------------------------------------------------
     // Utils
