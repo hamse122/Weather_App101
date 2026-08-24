@@ -212,25 +212,97 @@ defineState(state, config = {}) {
         }
     }
 
-    /* ---------------- TIME TRAVEL ---------------- */
-    async undo() {
-        const last = this.history.pop();
+/* ---------------- TIME TRAVEL ---------------- */
+
+async undo(options = {}) {
+    const { steps = 1, silent = false } = options;
+
+    if (this._timeTraveling) return false;
+    if (!Number.isInteger(steps) || steps < 1) {
+        throw new RangeError("steps must be a positive integer");
+    }
+
+    this._timeTraveling = true;
+
+    try {
+        let last = null;
+        let count = 0;
+
+        while (count < steps && this.history.length) {
+            const entry = this.history.pop();
+
+            if (!entry) break;
+
+            this.future.push(entry);
+            this.state = structuredClone(entry.from ?? this.state);
+            last = entry;
+            count++;
+        }
+
         if (!last) return false;
 
-        this.future.push(last);
-        this.state = last.from;
-        this._emit("undo", last);
-        return true;
+        if (!silent) {
+            await Promise.resolve(this._emit("undo", {
+                entry: last,
+                steps: count,
+                state: this.state
+            }));
+        }
+
+        return {
+            success: true,
+            steps: count,
+            state: this.state
+        };
+    } finally {
+        this._timeTraveling = false;
+    }
+}
+
+async redo(options = {}) {
+    const { steps = 1, silent = false } = options;
+
+    if (this._timeTraveling) return false;
+    if (!Number.isInteger(steps) || steps < 1) {
+        throw new RangeError("steps must be a positive integer");
     }
 
-    async redo() {
-        const next = this.future.pop();
+    this._timeTraveling = true;
+
+    try {
+        let next = null;
+        let count = 0;
+
+        while (count < steps && this.future.length) {
+            next = this.future.pop();
+
+            if (!next) break;
+
+            this.state = structuredClone(next.to);
+            this.history.push(next);
+
+            count++;
+        }
+
         if (!next) return false;
 
-        await this.transitionTo(next.to, next.payload);
-        return true;
-    }
+        if (!silent) {
+            await Promise.resolve(this._emit("redo", {
+                entry: next,
+                steps: count,
+                state: this.state
+            }));
+        }
 
+        return {
+            success: true,
+            steps: count,
+            state: this.state
+        };
+    } finally {
+        this._timeTraveling = false;
+    }
+}
     /* ---------------- UTILITIES ---------------- */
     getState() {
         return this.state;
