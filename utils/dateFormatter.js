@@ -213,31 +213,103 @@ export function subtract(date,opts){
    Differences
 -------------------------------- */
 
-export function diff(a,b,unit="day"){
+export function diff(a, b, unit = "day", options = {}) {
+  const {
+    absolute = true,
+    rounding = "floor", // floor | ceil | round | trunc
+    calendar = false
+  } = options;
 
-  const d1=normalizeDate(a);
-  const d2=normalizeDate(b);
-  if(!d1||!d2) return NaN;
+  const d1 = normalizeDate(a);
+  const d2 = normalizeDate(b);
 
-  const delta=Math.abs(d1-d2);
+  if (!d1 || !d2) return NaN;
 
-  switch(unit){
-    case "second": return Math.floor(delta/MS.second);
-    case "minute": return Math.floor(delta/MS.minute);
-    case "hour": return Math.floor(delta/MS.hour);
-    case "day": return Math.floor(delta/MS.day);
+  const delta = d1.getTime() - d2.getTime();
+  const value = absolute ? Math.abs(delta) : delta;
+
+  const round = Math[rounding] || Math.floor;
+
+  switch (unit.toLowerCase()) {
+    case "millisecond":
+    case "milliseconds":
+    case "ms":
+      return value;
+
+    case "second":
+    case "seconds":
+    case "s":
+      return round(value / MS.second);
+
+    case "minute":
+    case "minutes":
+    case "m":
+      return round(value / MS.minute);
+
+    case "hour":
+    case "hours":
+    case "h":
+      return round(value / MS.hour);
+
+    case "day":
+    case "days":
+    case "d":
+      return calendar
+        ? diffCalendarDays(d1, d2, absolute)
+        : round(value / MS.day);
+
+    case "week":
+    case "weeks":
+    case "w":
+      return round(value / (MS.day * 7));
+
     case "month":
-      return Math.abs(
-        (d1.getFullYear()-d2.getFullYear())*12 +
-        d1.getMonth()-d2.getMonth()
-      );
+    case "months":
+      return diffMonths(d1, d2, absolute);
+
+    case "quarter":
+    case "quarters":
+      return round(diffMonths(d1, d2, false) / 3) * (absolute ? 1 : 1);
+
     case "year":
-      return Math.abs(d1.getFullYear()-d2.getFullYear());
+    case "years":
+    case "y":
+      return diffYears(d1, d2, absolute);
+
     default:
-      return delta;
+      throw new RangeError(`Unsupported diff unit: "${unit}"`);
   }
 }
 
+function diffCalendarDays(d1, d2, absolute = true) {
+  const start1 = Date.UTC(
+    d1.getFullYear(),
+    d1.getMonth(),
+    d1.getDate()
+  );
+
+  const start2 = Date.UTC(
+    d2.getFullYear(),
+    d2.getMonth(),
+    d2.getDate()
+  );
+
+  const result = (start1 - start2) / MS.day;
+  return absolute ? Math.abs(result) : result;
+}
+
+function diffMonths(d1, d2, absolute = true) {
+  const result =
+    (d1.getFullYear() - d2.getFullYear()) * 12 +
+    (d1.getMonth() - d2.getMonth());
+
+  return absolute ? Math.abs(result) : result;
+}
+
+function diffYears(d1, d2, absolute = true) {
+  const result = d1.getFullYear() - d2.getFullYear();
+  return absolute ? Math.abs(result) : result;
+}
 /* --------------------------------
    Date Info
 -------------------------------- */
