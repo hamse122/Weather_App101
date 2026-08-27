@@ -63,25 +63,53 @@ class TaskRunner {
 // EVENTS
 // =====================
 
-on(event, handler, { once = false, priority = 0 } = {}) {
+on(event, handler, { once = false, priority = 0, signal } = {}) {
+    if (typeof event !== "string" && typeof event !== "symbol") {
+        throw new TypeError("Event name must be a string or symbol");
+    }
+
     if (typeof handler !== "function") {
         throw new TypeError("Event handler must be a function");
     }
 
-    (this.events[event] ??= []).push({
+    if (signal?.aborted) {
+        return () => {};
+    }
+
+    const listener = {
         handler,
-        once,
-        priority
-    });
+        once: !!once,
+        priority: Number.isFinite(priority) ? priority : 0,
+        signal,
+        abortHandler: null
+    };
+
+    (this.events[event] ??= []).push(listener);
 
     this.events[event].sort((a, b) => b.priority - a.priority);
+
+    if (signal) {
+        listener.abortHandler = () => this.off(event, handler);
+        signal.addEventListener("abort", listener.abortHandler, { once: true });
+    }
 
     return () => this.off(event, handler);
 }
 
 off(event, handler) {
     const listeners = this.events[event];
-    if (!listeners) return this;
+    if (!listeners?.length) return this;
+
+    const removed = listeners.filter(
+        listener => listener.handler === handler
+    );
+
+    for (const listener of removed) {
+        listener.signal?.removeEventListener(
+            "abort",
+            listener.abortHandler
+        );
+    }
 
     this.events[event] = listeners.filter(
         listener => listener.handler !== handler
@@ -101,31 +129,83 @@ once(event, handler, options = {}) {
     });
 }
 
-async emit(event, payload) {
+async emit(event, payload, options = {}) {
+    const {
+        parallel = false,
+        throwOnError = false,
+        signal
+    } = options;
+
+    if (signal?.aborted) {
+        throw new Error("Event emission aborted");
+    }
+
+    const directListeners = [...(this.events[event] ?? [])];
+    const wildcardListeners =
+        event === "*" ? [] : [...(this.events["*"] ?? [])];
+
     const listeners = [
-        ...(this.events[event] ?? []),
-        ...(this.events["*"] ?? [])
+        ...directListeners.map(listener => ({
+            ...listener,
+            wildcard: false
+        })),
+        ...wildcardListeners.map(listener => ({
+            ...listener,
+            wildcard: true
+        }))
     ];
 
-    for (const listener of listeners) {
+    const errors = [];
+
+    const execute = async listener => {
+        if (signal?.aborted) {
+            throw new Error("Event emission aborted");
+        }
+
         try {
-            if (event === "*") {
-                await listener.handler(payload);
-            } else if ((this.events["*"] ?? []).includes(listener)) {
-                await listener.handler(event, payload);
-            } else {
-                await listener.handler(payload);
-            }
+            const result = listener.wildcard
+                ? await listener.handler(event, payload)
+                : await listener.handler(payload);
 
             if (listener.once) {
-                this.off(event, listener.handler);
+                this.off(
+                    listener.wildcard ? "*" : event,
+                    listener.handler
+                );
             }
+
+            return result;
         } catch (err) {
-            console.error(`[Event:${event}]`, err);
+            errors.push(err);
+
+            if (throwOnError) {
+                throw err;
+            }
+
+            console.error(`[Event:${String(event)}]`, err);
+            return undefined;
+        }
+    };
+
+    let results;
+
+    if (parallel) {
+        results = await Promise.all(
+            listeners.map(listener => execute(listener))
+        );
+    } else {
+        results = [];
+
+        for (const listener of listeners) {
+            results.push(await execute(listener));
         }
     }
 
-    return listeners.length;
+    return {
+        count: listeners.length,
+        results,
+        errors
+    };
 }
 
     // =====================
