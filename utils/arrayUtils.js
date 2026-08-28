@@ -7,16 +7,61 @@
 
 const isArray = Array.isArray;
 
-function ensureArray(arr) {
-  if (!isArray(arr)) {
-    throw new TypeError(`Expected an array but received: ${typeof arr}`);
+function getType(value) {
+  if (value === null) return "null";
+  if (isArray(value)) return "array";
+
+  const type = typeof value;
+
+  if (type === "object") {
+    return value?.constructor?.name || "object";
   }
+
+  return type;
+}
+
+function ensureArray(arr, name = "value") {
+  if (!isArray(arr)) {
+    throw new TypeError(
+      `${name} must be an array. Received: ${getType(arr)}`
+    );
+  }
+
+  return arr;
 }
 
 function ensureFunction(fn, name = "callback") {
   if (typeof fn !== "function") {
-    throw new TypeError(`${name} must be a function`);
+    throw new TypeError(
+      `${name} must be a function. Received: ${getType(fn)}`
+    );
   }
+
+  return fn;
+}
+
+function ensureNonEmptyArray(arr, name = "array") {
+  ensureArray(arr, name);
+
+  if (arr.length === 0) {
+    throw new RangeError(`${name} must not be empty`);
+  }
+
+  return arr;
+}
+
+function ensureIndex(index, length, name = "index") {
+  if (!Number.isInteger(index)) {
+    throw new TypeError(`${name} must be an integer`);
+  }
+
+  if (index < 0 || index >= length) {
+    throw new RangeError(
+      `${name} must be between 0 and ${Math.max(0, length - 1)}. Received: ${index}`
+    );
+  }
+
+  return index;
 }
 
 /* ---------------------------------- */
