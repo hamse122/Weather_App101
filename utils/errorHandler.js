@@ -17,34 +17,95 @@ export class EnhancedErrorHandler {
         this.circuitState = new Map(); // handlerName -> failures
     }
 
-    /* =========================
-       Configuration
-    ========================== */
+/* =========================
+   Configuration
+========================= */
 
-    setLogger(logger) {
-        this.logger = logger;
+setLogger(logger) {
+    if (logger != null && typeof logger !== "object") {
+        throw new TypeError("Logger must be an object or null");
     }
 
-    setFallback(handler) {
-        this.globalFallback = handler;
+    this.logger = logger;
+    return this;
+}
+
+setFallback(handler) {
+    if (handler != null && typeof handler !== "function") {
+        throw new TypeError("Fallback handler must be a function or null");
     }
 
-    registerHandler(type, handler, { retries = 0, breaker = 5 } = {}) {
-        this.handlers.set(type, {
-            handler,
-            retries,
-            breaker
-        });
+    this.globalFallback = handler;
+    return this;
+}
+
+registerHandler(
+    type,
+    handler,
+    {
+        retries = 0,
+        breaker = 5,
+        cooldown = 30_000,
+        timeout = 0,
+        enabled = true
+    } = {}
+) {
+    if (!type || typeof type !== "string") {
+        throw new TypeError("Handler type must be a non-empty string");
     }
 
-    registerTransport(transportFn) {
-        this.transports.add(transportFn);
+    if (typeof handler !== "function") {
+        throw new TypeError("Handler must be a function");
     }
 
-    onError(subscriber) {
-        this.subscribers.add(subscriber);
-        return () => this.subscribers.delete(subscriber);
+    this.handlers.set(type, {
+        handler,
+        retries: Math.max(0, Number(retries) || 0),
+        breaker: Math.max(1, Number(breaker) || 5),
+        cooldown: Math.max(0, Number(cooldown) || 0),
+        timeout: Math.max(0, Number(timeout) || 0),
+        enabled: Boolean(enabled),
+        failures: 0,
+        lastFailure: null,
+        circuitOpenUntil: null
+    });
+
+    return this;
+}
+
+unregisterHandler(type) {
+    return this.handlers.delete(type);
+}
+
+registerTransport(transportFn) {
+    if (typeof transportFn !== "function") {
+        throw new TypeError("Transport must be a function");
     }
+
+    this.transports.add(transportFn);
+
+    // Returns a cleanup function
+    return () => this.transports.delete(transportFn);
+}
+
+onError(subscriber) {
+    if (typeof subscriber !== "function") {
+        throw new TypeError("Error subscriber must be a function");
+    }
+
+    this.subscribers.add(subscriber);
+
+    return () => this.subscribers.delete(subscriber);
+}
+
+clearConfiguration() {
+    this.handlers.clear();
+    this.transports.clear();
+    this.subscribers.clear();
+    this.globalFallback = null;
+
+    return this;
+}
 
 /* =========================
    Core Handling
