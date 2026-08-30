@@ -1,16 +1,17 @@
 /**
- * Advanced Dependency Injection Container (v2 - 2026 Edition)
+ * Advanced Dependency Injection Container (v3 - 2026 Edition)
  * ------------------------------------------------------------
  * Features:
  * - Singleton / Transient / Scoped lifetimes
- * - True factory providers
+ * - Async-safe singleton and scoped resolution
+ * - Factory providers
  * - Child scopes
  * - Async providers
  * - Circular dependency detection
- * - Lifecycle hooks (onInit / onDestroy)
- * - Aliases
+ * - Lifecycle hooks
+ * - Aliases with circular alias detection
  * - Strict mode
- * - Resolution caching per-scope
+ * - Concurrent resolution deduplication
  */
 
 class DependencyInjector {
@@ -19,9 +20,11 @@ class DependencyInjector {
         this.singletons = parent ? parent.singletons : new Map();
         this.scopedCache = new Map();
         this.aliases = new Map();
+
         this.strict = strict;
         this.parent = parent;
         this.locked = false;
+        this.destroyed = false;
     }
 
     /* =========================
@@ -30,14 +33,23 @@ class DependencyInjector {
 
     register(name, implementation, options = {}) {
         this.ensureUnlocked();
+        this.ensureAlive();
+
+        if (!name || typeof name !== "string") {
+            throw new TypeError("Service name must be a non-empty string");
+        }
 
         const {
-            lifetime = "transient", // singleton | transient | scoped
+            lifetime = "transient",
             dependencies = null,
             factory = false,
             onInit = null,
             onDestroy = null
         } = options;
+
+        if (!["singleton", "transient", "scoped"].includes(lifetime)) {
+            throw new Error(`Invalid lifetime '${lifetime}'`);
+        }
 
         this.providers.set(name, {
             name,
@@ -82,12 +94,20 @@ class DependencyInjector {
     }
 
     value(name, val) {
-        return this.register(name, val, { lifetime: "singleton" });
+        return this.register(name, val, {
+            lifetime: "singleton"
+        });
     }
 
     alias(aliasName, serviceName) {
         this.ensureUnlocked();
+
+        if (!aliasName || !serviceName) {
+            throw new Error("Alias and service name are required");
+        }
+
         this.aliases.set(aliasName, serviceName);
+        return this;
     }
 
     /* =========================
@@ -95,6 +115,8 @@ class DependencyInjector {
     ========================== */
 
     async get(name, stack = []) {
+        this.ensureAlive();
+
         name = this.resolveName(name);
 
         const provider = this.getProvider(name);
@@ -112,68 +134,59 @@ class DependencyInjector {
             );
         }
 
-        // SINGLETON
+        // SINGLETON — cache the Promise immediately
         if (provider.lifetime === "singleton") {
             if (this.singletons.has(name)) {
                 return this.singletons.get(name);
             }
 
-            const instance = await this.instantiate(provider, [...stack, name]);
-            this.singletons.set(name, instance);
-            return instance;
+            const promise = this.instantiate(provider, [...stack, name])
+                .then(instance => {
+                    this.singletons.set(name, instance);
+                    return instance;
+                })
+                .catch(error => {
+                    this.singletons.delete(name);
+                    throw error;
+                });
+
+            this.singletons.set(name, promise);
+
+            return promise;
         }
 
-// SCOPED
-if (provider.lifetime === "scoped") {
+        // SCOPED — cache Promise immediately
+        if (provider.lifetime === "scoped") {
+            if (this.scopedCache.has(name)) {
+                return this.scopedCache.get(name);
+            }
 
-    const cached = this.scopedCache.get(name);
+            const promise = this.instantiate(provider, [...stack, name])
+                .then(instance => {
+                    this.scopedCache.set(name, instance);
+                    return instance;
+                })
+                .catch(error => {
+                    this.scopedCache.delete(name);
+                    throw error;
+                });
 
-    // Return existing instance or pending Promise
-    if (cached) {
-        return cached;
-    }
+            this.scopedCache.set(name, promise);
 
-    // Cache the Promise immediately to prevent duplicate creation
-    const promise = this.instantiate(provider, [...stack, name])
-        .then(instance => {
-            // Replace Promise with the resolved instance
-            this.scopedCache.set(name, instance);
-
-            // Optional metrics
-            this.metrics?.scopedResolutions++;
-
-            // Optional event
-            this.emit?.("resolve:scoped", {
-                name,
-                instance
-            });
-
-            return instance;
-        })
-        .catch(err => {
-            // Remove failed Promise from cache
-            this.scopedCache.delete(name);
-
-            this.emit?.("resolve:error", {
-                name,
-                error: err
-            });
-
-            throw err;
-        });
-
-    // Store pending Promise
-    this.scopedCache.set(name, promise);
-
-    return promise;
-}
+            return promise;
+        }
 
         // TRANSIENT
         return this.instantiate(provider, [...stack, name]);
     }
 
     async instantiate(provider, stack) {
-        let { implementation, dependencies, factory, onInit } = provider;
+        let {
+            implementation,
+            dependencies,
+            factory,
+            onInit
+        } = provider;
 
         if (!dependencies && typeof implementation === "function") {
             dependencies = this.extractParamNames(implementation);
@@ -181,8 +194,8 @@ if (provider.lifetime === "scoped") {
 
         const resolvedDeps = [];
 
-        for (const dep of dependencies || []) {
-            resolvedDeps.push(await this.get(dep, stack));
+        for (const dependency of dependencies || []) {
+            resolvedDeps.push(await this.get(dependency, stack));
         }
 
         let instance;
@@ -199,7 +212,7 @@ if (provider.lifetime === "scoped") {
             instance = implementation;
         }
 
-        if (onInit) {
+        if (typeof onInit === "function") {
             await onInit(instance);
         }
 
@@ -211,6 +224,8 @@ if (provider.lifetime === "scoped") {
     ========================== */
 
     createScope() {
+        this.ensureAlive();
+
         return new DependencyInjector({
             strict: this.strict,
             parent: this
@@ -218,28 +233,53 @@ if (provider.lifetime === "scoped") {
     }
 
     async destroyScope() {
-        for (const [name, provider] of this.providers) {
-            if (
-                provider.lifetime === "scoped" &&
-                provider.onDestroy &&
-                this.scopedCache.has(name)
-            ) {
-                await provider.onDestroy(this.scopedCache.get(name));
+        if (this.destroyed) return;
+
+        for (const [name, instance] of this.scopedCache) {
+            const provider = this.getProvider(name);
+
+            if (!provider || !provider.onDestroy) continue;
+
+            try {
+                const resolvedInstance = await instance;
+
+                await provider.onDestroy(resolvedInstance);
+            } catch (error) {
+                console.error(
+                    `Failed to destroy scoped service '${name}':`,
+                    error
+                );
             }
         }
+
         this.scopedCache.clear();
+        this.destroyed = true;
     }
 
     async destroyAll() {
-        for (const [name, provider] of this.providers) {
-            if (
-                provider.lifetime === "singleton" &&
-                provider.onDestroy &&
-                this.singletons.has(name)
-            ) {
-                await provider.onDestroy(this.singletons.get(name));
+        if (this.parent) {
+            throw new Error(
+                "destroyAll() can only be called on the root container"
+            );
+        }
+
+        for (const [name, instance] of this.singletons) {
+            const provider = this.getProvider(name);
+
+            if (!provider || !provider.onDestroy) continue;
+
+            try {
+                const resolvedInstance = await instance;
+
+                await provider.onDestroy(resolvedInstance);
+            } catch (error) {
+                console.error(
+                    `Failed to destroy singleton '${name}':`,
+                    error
+                );
             }
         }
+
         this.singletons.clear();
     }
 
@@ -256,22 +296,50 @@ if (provider.lifetime === "scoped") {
     }
 
     resolveName(name) {
-        return this.aliases.get(name) || name;
+        const visited = new Set();
+        let current = name;
+
+        while (this.aliases.has(current)) {
+            if (visited.has(current)) {
+                throw new Error(
+                    `Circular alias detected: ${[...visited, current].join(" -> ")}`
+                );
+            }
+
+            visited.add(current);
+            current = this.aliases.get(current);
+        }
+
+        if (this.parent && !this.providers.has(current)) {
+            return this.parent.resolveName(current);
+        }
+
+        return current;
     }
 
     has(name) {
+        name = this.resolveName(name);
         return !!this.getProvider(name);
     }
 
     clear() {
         this.ensureUnlocked();
+
         this.providers.clear();
         this.aliases.clear();
         this.scopedCache.clear();
+
+        return this;
     }
 
     lock() {
         this.locked = true;
+        return this;
+    }
+
+    unlock() {
+        this.locked = false;
+        return this;
     }
 
     ensureUnlocked() {
@@ -280,9 +348,19 @@ if (provider.lifetime === "scoped") {
         }
     }
 
+    ensureAlive() {
+        if (this.destroyed) {
+            throw new Error("DI container scope has been destroyed.");
+        }
+    }
+
     isClass(fn) {
-        return typeof fn === "function" &&
-            /^class\s/.test(Function.prototype.toString.call(fn));
+        return (
+            typeof fn === "function" &&
+            /^class\s/.test(
+                Function.prototype.toString.call(fn)
+            )
+        );
     }
 
     extractParamNames(fn) {
@@ -291,12 +369,22 @@ if (provider.lifetime === "scoped") {
             .replace(/\/\*[\s\S]*?\*\//g, "")
             .replace(/\/\/.*$/gm, "");
 
-        const argsMatch = fnStr.match(/\(([^)]*)\)/);
+        const argsMatch =
+            fnStr.match(/^[^(]*\(([^)]*)\)/) ||
+            fnStr.match(/^([A-Za-z_$][\w$]*)\s*=>/);
+
         if (!argsMatch) return [];
 
-        return argsMatch[1]
+        const args = argsMatch[1] || argsMatch[0];
+
+        return args
             .split(",")
-            .map(s => s.trim().replace(/=.*$/, ""))
+            .map(arg =>
+                arg
+                    .trim()
+                    .replace(/=.*$/, "")
+                    .trim()
+            )
             .filter(Boolean);
     }
 }
