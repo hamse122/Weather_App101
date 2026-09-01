@@ -62,21 +62,37 @@ class DataPipeline {
         return this.stage('middleware', middleware);
     }
 
-    /* =========================
-       HOOK SYSTEM
-    ========================= */
-    hook(type, fn) {
-        if (this.hooks[type]) {
-            this.hooks[type].push(fn);
-        }
-        return this;
+/* =========================
+   HOOK SYSTEM
+========================= */
+
+hook(type, fn) {
+    if (typeof fn !== "function") {
+        throw new TypeError(`Hook for "${type}" must be a function`);
     }
 
-    async runHooks(type, payload) {
-        for (const fn of this.hooks[type] || []) {
+    if (!this.hooks[type]) {
+        this.hooks[type] = [];
+    }
+
+    this.hooks[type].push(fn);
+
+    return this;
+}
+
+async runHooks(type, payload) {
+    const hooks = this.hooks[type] || [];
+
+    for (const fn of [...hooks]) {
+        try {
             await fn(payload, this.context);
+        } catch (error) {
+            console.error(`[Hook:${type}]`, error);
         }
     }
+
+    return this;
+}
 
         /* =========================
 Architecture
