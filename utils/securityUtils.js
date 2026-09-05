@@ -364,29 +364,34 @@ export class SecurityUtils {
         }
     }
 
-    /* ------------------------------- UTILITIES ------------------------------- */
+/* ------------------------------- UTILITIES ------------------------------- */
 
-    /**
-     * Deep freeze object for immutability.
-     *
-     * @param {object} obj
-     * @returns {object}
-     */
-    static deepFreeze(obj) {
-        Object.freeze(obj);
-
-        for (const key of Object.keys(obj)) {
-            const value = obj[key];
-
-            if (
-                value &&
-                typeof value === 'object' &&
-                !Object.isFrozen(value)
-            ) {
-                SecurityUtils.deepFreeze(value);
-            }
-        }
-
+/**
+ * Deep freeze an object recursively.
+ *
+ * @param {*} obj
+ * @param {WeakSet<object>} seen
+ * @returns {*} The frozen object
+ */
+static deepFreeze(obj, seen = new WeakSet()) {
+    if (
+        obj === null ||
+        typeof obj !== "object" ||
+        seen.has(obj) ||
+        Object.isFrozen(obj)
+    ) {
         return obj;
     }
+
+    seen.add(obj);
+
+    for (const key of Reflect.ownKeys(obj)) {
+        const value = obj[key];
+
+        if (value && typeof value === "object") {
+            SecurityUtils.deepFreeze(value, seen);
+        }
+    }
+
+    return Object.freeze(obj);
 }
