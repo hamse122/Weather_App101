@@ -210,46 +210,102 @@ async runHooks(type, data, context = {}) {
         );
     }
 
-    /* -------------------- Utilities -------------------- */
+/* -------------------- Utilities -------------------- */
 
-    async withRetryAndTimeout(fn, { retries = 0, timeout } = {}) {
-        let attempt = 0;
+async withRetryAndTimeout(
+    fn,
+    {
+        retries = 0,
+        timeout = 0,
+        retryDelay = 0,
+        onRetry = null
+    } = {}
+) {
+    if (typeof fn !== "function") {
+        throw new TypeError("fn must be a function");
+    }
 
-        const run = async () => {
-            attempt++;
-            try {
-                if (!timeout) return await fn();
+    if (!Number.isInteger(retries) || retries < 0) {
+        throw new TypeError("retries must be a non-negative integer");
+    }
+
+    if (timeout < 0 || retryDelay < 0) {
+        throw new TypeError("timeout and retryDelay must be >= 0");
+    }
+
+    let attempt = 0;
+
+    const sleep = ms =>
+        ms > 0
+            ? new Promise(resolve => setTimeout(resolve, ms))
+            : Promise.resolve();
+
+    while (attempt <= retries) {
+        attempt++;
+
+        let timer = null;
+
+        try {
+            const operation = Promise.resolve().then(fn);
+
+            if (timeout > 0) {
+                const timeoutPromise = new Promise((_, reject) => {
+                    timer = setTimeout(() => {
+                        reject(
+                            Object.assign(
+                                new Error(`Timeout exceeded after ${timeout}ms`),
+                                { code: "ETIMEDOUT" }
+                            )
+                        );
+                    }, timeout);
+                });
 
                 return await Promise.race([
-                    fn(),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Timeout exceeded')), timeout)
-                    )
+                    operation,
+                    timeoutPromise
                 ]);
-            } catch (err) {
-                if (attempt > retries) throw err;
-                return run();
             }
-        };
 
-        return run();
-    }
+            return await operation;
+        } catch (error) {
+            if (attempt > retries) {
+                throw error;
+            }
 
-    unregisterAll() {
-        this.commandHandlers.clear();
-        this.queryHandlers.clear();
-        this.eventHandlers.clear();
-    }
+            if (typeof onRetry === "function") {
+                await onRetry(error, {
+                    attempt,
+                    retriesRemaining: retries - attempt + 1
+                });
+            }
 
-    stats() {
-        return {
-            commands: this.commandHandlers.size,
-            queries: this.queryHandlers.size,
-            events: [...this.eventHandlers.entries()]
-                .reduce((a, [k, v]) => ({ ...a, [k]: v.length }), {})
-        };
+            await sleep(retryDelay);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 }
 
-module.exports = CQRS;
+unregisterAll() {
+    this.commandHandlers.clear();
+    this.queryHandlers.clear();
+    this.eventHandlers.clear();
 
+    return this;
+}
+
+stats() {
+    const events = {};
+
+    for (const [event, handlers] of this.eventHandlers.entries()) {
+        events[event] = Array.isArray(handlers)
+            ? handlers.length
+            : 0;
+    }
+
+    return Object.freeze({
+        commands: this.commandHandlers.size,
+        queries: this.queryHandlers.size,
+        events
+    });
+}
