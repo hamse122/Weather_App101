@@ -155,21 +155,35 @@ class DatabaseManager {
         };
     }
 
-    /* ---------------------------------- */
-    /* Query Execution                    */
-    /* ---------------------------------- */
+/* ---------------------------------- */
+/* Query Execution                    */
+/* ---------------------------------- */
 
-    async query(fn, config = {}) {
-        const conn = await this.connect(config);
-        const key = this.getPoolKey(config.driver ?? this.defaultDriver, config);
-        const pool = this.pools.get(key);
-
-        try {
-            return await fn(conn, this.createQueryBuilder());
-        } finally {
-            pool.release(conn);
-        }
+async query(fn, config = {}) {
+    if (typeof fn !== "function") {
+        throw new TypeError("Query callback must be a function");
     }
+
+    const driver = config.driver ?? this.defaultDriver;
+    const key = this.getPoolKey(driver, config);
+
+    const conn = await this.connect(config);
+    const pool = this.pools.get(key);
+
+    if (!pool) {
+        throw new Error(`Connection pool '${key}' not found`);
+    }
+
+    try {
+        const builder = this.createQueryBuilder(config);
+        return await fn(conn, builder);
+    } catch (error) {
+        error.queryPool = key;
+        throw error;
+    } finally {
+        pool.release(conn);
+    }
+}
 
     /* ---------------------------------- */
     /* Query Builder (Safe)               */
