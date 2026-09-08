@@ -25,55 +25,122 @@ export class Serialization {
         }
     }
 
-    /********************************************************************
-     * QUERY STRING
-     ********************************************************************/
-    
-    static toQueryString(obj) {
-        const params = new URLSearchParams();
+/********************************************************************
+ * QUERY STRING — Advanced & Robust
+ ********************************************************************/
 
-        const build = (prefix, value) => {
-            if (value === undefined || value === null) return;
+static toQueryString(obj = {}) {
+    if (!obj || typeof obj !== "object") return "";
 
-            if (Array.isArray(value)) {
-                value.forEach(v => build(prefix, v));
-            } else if (typeof value === "object") {
-                Object.entries(value).forEach(([k, v]) => {
-                    build(`${prefix}[${k}]`, v);
-                });
-            } else {
-                params.append(prefix, value);
+    const params = new URLSearchParams();
+
+    const build = (prefix, value) => {
+        if (value === undefined || value === null) return;
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                build(`${prefix}[]`, item);
             }
-        };
-
-        Object.entries(obj).forEach(([key, value]) => build(key, value));
-        return params.toString();
-    }
-
-    static fromQueryString(str) {
-        const params = new URLSearchParams(str);
-        const result = {};
-
-        for (const [key, value] of params.entries()) {
-            if (key.includes("[")) {
-                // nested: user[name]
-                const keys = key.split(/[\[\]]/).filter(Boolean);
-                let current = result;
-
-                keys.forEach((k, i) => {
-                    if (i === keys.length - 1) {
-                        current[k] = value;
-                    } else {
-                        current[k] = current[k] || {};
-                        current = current[k];
-                    }
-                });
-            } else {
-                result[key] = value;
-            }
+            return;
         }
-        return result;
+
+        if (value instanceof Date) {
+            params.append(prefix, value.toISOString());
+            return;
+        }
+
+        if (typeof value === "object") {
+            for (const [key, nestedValue] of Object.entries(value)) {
+                build(`${prefix}[${key}]`, nestedValue);
+            }
+            return;
+        }
+
+        if (typeof value === "boolean") {
+            params.append(prefix, value ? "true" : "false");
+            return;
+        }
+
+        params.append(prefix, String(value));
+    };
+
+    for (const [key, value] of Object.entries(obj)) {
+        build(key, value);
     }
+
+    return params.toString();
+}
+
+static fromQueryString(str = "") {
+    const params = new URLSearchParams(
+        String(str).replace(/^\?/, "")
+    );
+
+    const result = {};
+
+    const assign = (target, keys, value) => {
+        let current = target;
+
+        keys.forEach((key, index) => {
+            const last = index === keys.length - 1;
+
+            if (last) {
+                if (key === "") {
+                    if (!Array.isArray(current)) return;
+                    current.push(value);
+                    return;
+                }
+
+                if (key in current) {
+                    current[key] = Array.isArray(current[key])
+                        ? [...current[key], value]
+                        : [current[key], value];
+                } else {
+                    current[key] = value;
+                }
+
+                return;
+            }
+
+            const nextKey = keys[index + 1];
+            const shouldBeArray = nextKey === "";
+
+            if (!(key in current)) {
+                current[key] = shouldBeArray ? [] : {};
+            }
+
+            current = current[key];
+        });
+    };
+
+    for (const [rawKey, value] of params.entries()) {
+        const keys = rawKey
+            .split(/[\[\]]/)
+            .filter((_, index, arr) => index === 0 || arr[index] !== "");
+
+        const normalizedKeys = rawKey.includes("[]")
+            ? rawKey.replace(/\[\]/g, "[]").split(/[\[\]]/).filter(Boolean)
+            : rawKey.split(/[\[\]]/).filter(Boolean);
+
+        if (rawKey.endsWith("[]")) {
+            const baseKey = rawKey.slice(0, -2);
+
+            if (!(baseKey in result)) {
+                result[baseKey] = [];
+            }
+
+            if (Array.isArray(result[baseKey])) {
+                result[baseKey].push(value);
+            }
+
+            continue;
+        }
+
+        assign(result, normalizedKeys.length ? normalizedKeys : keys, value);
+    }
+
+    return result;
+}
 
     /********************************************************************
      * FORM DATA SERIALIZATION
