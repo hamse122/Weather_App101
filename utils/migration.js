@@ -1,5 +1,5 @@
 /**
- * Migration System v5
+ * Migration System v6
  * - Safe registration
  * - Version validation
  * - Sequential migrations
@@ -8,6 +8,11 @@
  * - Migration context
  * - Strict rollback handling
  * - History tracking
+ * - Migration locking
+ * - Progress events
+ * - Dry-run support
+ * - Migration validation
+ * - History metadata
  */
 
 export class MigrationManager {
@@ -16,9 +21,17 @@ export class MigrationManager {
         this.version = this.#validateVersion(initialVersion);
         this.history = [];
         this.running = false;
+        this.locked = false;
+        this.listeners = new Map();
     }
 
-    register(version, up, down = null) {
+    /* =========================
+       REGISTRATION
+    ========================== */
+
+    register(version, up, down = null, metadata = {}) {
+        this.#ensureUnlocked();
+
         version = this.#validateVersion(version);
 
         if (this.migrations.has(version)) {
@@ -30,12 +43,42 @@ export class MigrationManager {
         }
 
         if (down !== null && typeof down !== "function") {
-            throw new TypeError("Migration 'down' must be a function or null");
+            throw new TypeError(
+                "Migration 'down' must be a function or null"
+            );
         }
 
-        this.migrations.set(version, { version, up, down });
+        this.migrations.set(version, {
+            version,
+            up,
+            down,
+            metadata: { ...metadata }
+        });
+
+        this.#emit("registered", {
+            version,
+            metadata
+        });
+
         return this;
     }
+
+    unregister(version) {
+        this.#ensureUnlocked();
+
+        version = this.#validateVersion(version);
+
+        if (!this.migrations.has(version)) {
+            return false;
+        }
+
+        this.migrations.delete(version);
+        return true;
+    }
+
+    /* =========================
+       VERSION
+    ========================== */
 
     getVersion() {
         return this.version;
@@ -43,14 +86,22 @@ export class MigrationManager {
 
     setVersion(version) {
         if (this.running) {
-            throw new Error("Cannot change version while migration is running");
+            throw new Error(
+                "Cannot change version while migration is running"
+            );
         }
+
+        this.#ensureUnlocked();
 
         this.version = this.#validateVersion(version);
         return this;
     }
 
-    async migrate(targetVersion, context = {}) {
+    /* =========================
+       MIGRATION
+    ========================== */
+
+    async migrate(targetVersion, context = {}, options = {}) {
         targetVersion = this.#validateVersion(targetVersion);
 
         if (this.running) {
@@ -61,14 +112,43 @@ export class MigrationManager {
             return this.version;
         }
 
+        const {
+            dryRun = false,
+            stopOnError = true
+        } = options;
+
         this.running = true;
+
+        const startedAt = Date.now();
+        const fromVersion = this.version;
+
+        this.#emit("start", {
+            from: fromVersion,
+            to: targetVersion,
+            dryRun
+        });
 
         try {
             if (targetVersion > this.version) {
-                await this.#up(targetVersion, context);
+                await this.#up(
+                    targetVersion,
+                    context,
+                    { dryRun, stopOnError }
+                );
             } else {
-                await this.#down(targetVersion, context);
+                await this.#down(
+                    targetVersion,
+                    context,
+                    { dryRun, stopOnError }
+                );
             }
+
+            this.#emit("complete", {
+                from: fromVersion,
+                to: this.version,
+                duration: Date.now() - startedAt,
+                dryRun
+            });
 
             return this.version;
         } finally {
@@ -76,30 +156,55 @@ export class MigrationManager {
         }
     }
 
-    async #up(targetVersion, context) {
-        const migrations = this.getMigrations()
-            .filter(
-                migration =>
-                    migration.version > this.version &&
-                    migration.version <= targetVersion
-            );
+    async #up(targetVersion, context, options) {
+        const migrations = this.getMigrations().filter(
+            migration =>
+                migration.version > this.version &&
+                migration.version <= targetVersion
+        );
 
         for (const migration of migrations) {
-            try {
-                await migration.up({
-                    from: this.version,
-                    to: migration.version,
-                    ...context
-                });
+            const from = this.version;
 
-                this.history.push({
+            this.#emit("before", {
+                version: migration.version,
+                direction: "up"
+            });
+
+            try {
+                if (!options.dryRun) {
+                    await migration.up({
+                        from,
+                        to: migration.version,
+                        version: migration.version,
+                        direction: "up",
+                        ...context
+                    });
+
+                    this.version = migration.version;
+
+                    this.history.push({
+                        version: migration.version,
+                        from,
+                        to: migration.version,
+                        direction: "up",
+                        metadata: { ...migration.metadata },
+                        timestamp: Date.now()
+                    });
+                }
+
+                this.#emit("after", {
                     version: migration.version,
                     direction: "up",
-                    timestamp: Date.now()
+                    dryRun: options.dryRun
+                });
+            } catch (error) {
+                this.#emit("error", {
+                    version: migration.version,
+                    direction: "up",
+                    error
                 });
 
-                this.version = migration.version;
-            } catch (error) {
                 throw new Error(
                     `Migration ${migration.version} failed: ${error.message}`,
                     { cause: error }
@@ -108,7 +213,7 @@ export class MigrationManager {
         }
     }
 
-    async #down(targetVersion, context) {
+    async #down(targetVersion, context, options) {
         const migrations = this.getMigrations()
             .filter(
                 migration =>
@@ -124,21 +229,48 @@ export class MigrationManager {
                 );
             }
 
-            try {
-                await migration.down({
-                    from: this.version,
-                    to: migration.version - 1,
-                    ...context
-                });
+            const from = this.version;
+            const to = migration.version - 1;
 
-                this.history.push({
+            this.#emit("before", {
+                version: migration.version,
+                direction: "down"
+            });
+
+            try {
+                if (!options.dryRun) {
+                    await migration.down({
+                        from,
+                        to,
+                        version: migration.version,
+                        direction: "down",
+                        ...context
+                    });
+
+                    this.version = to;
+
+                    this.history.push({
+                        version: migration.version,
+                        from,
+                        to,
+                        direction: "down",
+                        metadata: { ...migration.metadata },
+                        timestamp: Date.now()
+                    });
+                }
+
+                this.#emit("after", {
                     version: migration.version,
                     direction: "down",
-                    timestamp: Date.now()
+                    dryRun: options.dryRun
+                });
+            } catch (error) {
+                this.#emit("error", {
+                    version: migration.version,
+                    direction: "down",
+                    error
                 });
 
-                this.version = migration.version - 1;
-            } catch (error) {
                 throw new Error(
                     `Rollback ${migration.version} failed: ${error.message}`,
                     { cause: error }
@@ -147,12 +279,20 @@ export class MigrationManager {
         }
     }
 
+    /* =========================
+       INSPECTION
+    ========================== */
+
     getMigrations() {
         return [...this.migrations.values()]
             .sort((a, b) => a.version - b.version);
     }
 
     getPending(targetVersion = Infinity) {
+        targetVersion = this.#validateVersion(
+            targetVersion === Infinity ? Number.MAX_SAFE_INTEGER : targetVersion
+        );
+
         return this.getMigrations().filter(
             migration =>
                 migration.version > this.version &&
@@ -161,7 +301,10 @@ export class MigrationManager {
     }
 
     getHistory() {
-        return [...this.history];
+        return this.history.map(entry => ({
+            ...entry,
+            metadata: { ...entry.metadata }
+        }));
     }
 
     getAppliedMigrations() {
@@ -171,13 +314,120 @@ export class MigrationManager {
     }
 
     needsMigration(targetVersion) {
-        return this.version !== targetVersion;
+        return this.version !== this.#validateVersion(targetVersion);
     }
 
+    validate(targetVersion = Infinity) {
+        const migrations = this.getMigrations();
+        const errors = [];
+
+        for (let i = 1; i < migrations.length; i++) {
+            if (migrations[i].version <= migrations[i - 1].version) {
+                errors.push(
+                    `Invalid migration order at version ${migrations[i].version}`
+                );
+            }
+        }
+
+        if (
+            targetVersion !== Infinity &&
+            !migrations.some(
+                migration => migration.version === targetVersion
+            ) &&
+            targetVersion !== this.version
+        ) {
+            errors.push(
+                `Target version ${targetVersion} is not registered`
+            );
+        }
+
+        return {
+            valid: errors.length === 0,
+            errors
+        };
+    }
+
+    /* =========================
+       HISTORY
+    ========================== */
+
     resetHistory() {
+        this.#ensureUnlocked();
         this.history.length = 0;
         return this;
     }
+
+    /* =========================
+       EVENTS
+    ========================== */
+
+    on(event, listener) {
+        if (typeof listener !== "function") {
+            throw new TypeError("Listener must be a function");
+        }
+
+        if (!this.listeners.has(event)) {
+            this.listeners.set(event, new Set());
+        }
+
+        this.listeners.get(event).add(listener);
+
+        return () => this.off(event, listener);
+    }
+
+    off(event, listener) {
+        this.listeners.get(event)?.delete(listener);
+        return this;
+    }
+
+    #emit(event, payload) {
+        this.listeners.get(event)?.forEach(listener => {
+            try {
+                listener(payload);
+            } catch (error) {
+                console.error(
+                    `[MigrationManager] ${event} listener failed:`,
+                    error
+                );
+            }
+        });
+    }
+
+    /* =========================
+       LOCKING
+    ========================== */
+
+    lock() {
+        if (this.running) {
+            throw new Error(
+                "Cannot lock migration manager while running"
+            );
+        }
+
+        this.locked = true;
+        return this;
+    }
+
+    unlock() {
+        if (this.running) {
+            throw new Error(
+                "Cannot unlock migration manager while running"
+            );
+        }
+
+        this.locked = false;
+        return this;
+    }
+
+    #ensureUnlocked() {
+        if (this.locked) {
+            throw new Error("Migration manager is locked");
+        }
+    }
+
+    /* =========================
+       UTILITIES
+    ========================== */
 
     #validateVersion(version) {
         if (!Number.isInteger(version) || version < 0) {
@@ -196,8 +446,12 @@ export class MigrationManager {
 
 export class DataMigration {
     static map(data = {}, mapping = {}) {
-        if (!data || typeof data !== "object") {
-            throw new TypeError("Data must be an object");
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+            throw new TypeError("Data must be a plain object");
+        }
+
+        if (!mapping || typeof mapping !== "object") {
+            throw new TypeError("Mapping must be an object");
         }
 
         const result = {};
@@ -243,6 +497,10 @@ export class DataMigration {
             throw new TypeError("Items must be an array");
         }
 
+        if (typeof fn !== "function") {
+            throw new TypeError("Transform must be a function");
+        }
+
         return Promise.all(items.map(fn));
     }
 
@@ -254,9 +512,11 @@ export class DataMigration {
     }
 
     static clone(data) {
-        return typeof structuredClone === "function"
-            ? structuredClone(data)
-            : JSON.parse(JSON.stringify(data));
+        if (typeof structuredClone === "function") {
+            return structuredClone(data);
+        }
+
+        return JSON.parse(JSON.stringify(data));
     }
 }
 
