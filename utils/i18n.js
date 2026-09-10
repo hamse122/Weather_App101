@@ -62,23 +62,42 @@ export class I18n {
         return [locale, lang].filter(Boolean);
     }
 
-    /* ---------------------------------- */
-    /* Deep Merge                         */
-    /* ---------------------------------- */
+/* ---------------------------------- */
+/* Deep Merge                         */
+/* ---------------------------------- */
 
-    static deepMerge(target, source) {
-        for (const key in source) {
-            const val = source[key];
+static deepMerge(target = {}, source = {}) {
+    if (!target || typeof target !== "object" || Array.isArray(target)) {
+        target = {};
+    }
 
-            if (val && typeof val === "object" && !Array.isArray(val)) {
-                target[key] = target[key] || {};
-                this.deepMerge(target[key], val);
-            } else {
-                target[key] = val;
-            }
-        }
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
         return target;
     }
+
+    for (const key of Object.keys(source)) {
+        const value = source[key];
+
+        if (
+            value !== null &&
+            typeof value === "object" &&
+            !Array.isArray(value)
+        ) {
+            const existing =
+                target[key] &&
+                typeof target[key] === "object" &&
+                !Array.isArray(target[key])
+                    ? target[key]
+                    : {};
+
+            target[key] = this.deepMerge(existing, value);
+        } else {
+            target[key] = value;
+        }
+    }
+
+    return target;
+}
 
     /* ---------------------------------- */
     /* Fast Path Resolver (compiled)      */
