@@ -209,59 +209,112 @@ async _load(key, defaultValue = null) {
         };
     }
 
-    /* ============================
-       Experiments (A/B/n)
-    ============================ */
+/* ============================
+   Experiments (A/B/n)
+============================ */
 
-    createExperiment(name, variants, options = {}) {
-        if (!Array.isArray(variants) || variants.length < 2) {
-            throw new Error('Experiment must have >= 2 variants');
-        }
-
-        const normalized = variants.map(v => ({
-            name: v.name,
-            weight: v.weight ?? 1
-        }));
-
-        this.experiments.set(name, {
-            variants: normalized,
-            exposures: new Set(),
-            analyticsHook: options.analyticsHook || null,
-            createdAt: Date.now()
-        });
-
-        return this;
+createExperiment(name, variants, options = {}) {
+    if (!name || typeof name !== "string") {
+        throw new TypeError("Experiment name must be a non-empty string");
     }
 
-    getVariant(experimentName, userId) {
-        const exp = this.experiments.get(experimentName);
-        if (!exp || !userId) return null;
+    if (!Array.isArray(variants) || variants.length < 2) {
+        throw new Error("Experiment must have at least 2 variants");
+    }
 
-        const total = exp.variants.reduce((s, v) => s + v.weight, 0);
-        const hash = this._hash(userId) % total;
+    const normalized = variants.map((variant, index) => {
+        if (!variant?.name || typeof variant.name !== "string") {
+            throw new Error(`Invalid variant at index ${index}`);
+        }
 
-        let acc = 0;
-        let chosen;
+        const weight = Number(variant.weight ?? 1);
 
-        for (const v of exp.variants) {
-            acc += v.weight;
-            if (hash < acc) {
-                chosen = v.name;
-                break;
+        if (!Number.isFinite(weight) || weight <= 0) {
+            throw new Error(`Invalid weight for variant '${variant.name}'`);
+        }
+
+        return Object.freeze({
+            name: variant.name,
+            weight
+        });
+    });
+
+    const names = new Set(normalized.map(v => v.name));
+
+    if (names.size !== normalized.length) {
+        throw new Error("Experiment variants must have unique names");
+    }
+
+    this.experiments.set(name, {
+        name,
+        variants: normalized,
+        exposures: new Set(),
+        analyticsHook:
+            typeof options.analyticsHook === "function"
+                ? options.analyticsHook
+                : null,
+        createdAt: Date.now(),
+        metadata: options.metadata || {}
+    });
+
+    return this;
+}
+
+getVariant(experimentName, userId) {
+    const exp = this.experiments.get(experimentName);
+
+    if (!exp || userId === undefined || userId === null) {
+        return null;
+    }
+
+    const id = String(userId);
+
+    const total = exp.variants.reduce(
+        (sum, variant) => sum + variant.weight,
+        0
+    );
+
+    const hash = this._hash(`${experimentName}:${id}`);
+    const bucket = hash % total;
+
+    let cumulative = 0;
+    let chosen = null;
+
+    for (const variant of exp.variants) {
+        cumulative += variant.weight;
+
+        if (bucket < cumulative) {
+            chosen = variant.name;
+            break;
+        }
+    }
+
+    if (!chosen) {
+        chosen = exp.variants.at(-1).name;
+    }
+
+    if (!exp.exposures.has(id)) {
+        exp.exposures.add(id);
+
+        if (exp.analyticsHook) {
+            try {
+                exp.analyticsHook({
+                    experiment: experimentName,
+                    userId: id,
+                    variant: chosen,
+                    timestamp: Date.now()
+                });
+            } catch (error) {
+                console.error(
+                    `[Experiment] Analytics hook failed for "${experimentName}":`,
+                    error
+                );
             }
         }
-
-        if (!exp.exposures.has(userId)) {
-            exp.exposures.add(userId);
-            exp.analyticsHook?.({
-                experiment: experimentName,
-                userId,
-                variant: chosen
-            });
-        }
-
-        return chosen;
     }
+
+    return chosen;
+}
 
     /* ============================
        Global Controls
