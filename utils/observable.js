@@ -120,25 +120,32 @@ class Observable {
         if (this.paused || this.completed) return false;
 
         const observers = [...this.observers];
+        let delivered = 0;
 
         for (const observer of observers) {
             this._safeCall(() => {
                 if (typeof observer === "function") {
                     observer(data);
-                } else {
-                    observer?.next?.(data);
+                    delivered++;
+                    return;
+                }
 
-                    // Backward compatibility
-                    if (!observer?.next && observer?.update) {
-                        observer.update(data);
-                    }
+                if (observer?.next && typeof observer.next === "function") {
+                    observer.next(data);
+                    delivered++;
+                    return;
+                }
+
+                // Backward compatibility
+                if (observer?.update && typeof observer.update === "function") {
+                    observer.update(data);
+                    delivered++;
                 }
             });
         }
 
-        return true;
+        return delivered > 0;
     }
-
     /* ==========================
        ERROR
     ========================== */
