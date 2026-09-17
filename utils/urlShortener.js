@@ -287,96 +287,142 @@ normalizeCode(code) {
         return data.longUrl;
     }
 
-    /* -------------------------
-       ANALYTICS & MANAGEMENT
-    ------------------------- */
+   /* -------------------------
+   ANALYTICS & MANAGEMENT
+------------------------- */
 
-    getStats(code) {
-        code = this.normalizeCode(code);
-        const data = this.urls.get(code);
-        if (!data) return null;
+getStats(code) {
+    code = this.normalizeCode(code);
+    const data = this.urls.get(code);
 
-        return {
-            code: data.code,
-            longUrl: data.longUrl,
-            shortUrl: data.shortUrl,
-            createdAt: data.createdAt,
-            clicks: data.clicks,
-            uniqueVisitors: data.uniqueVisitors.size,
-            analytics: data.analytics,
-            referrers: data.referrers,
-            metadata: data.metadata,
-            tags: data.tags,
-            expiresAt: data.expiresAt
+    if (!data) return null;
+
+    return {
+        code: data.code,
+        longUrl: data.longUrl,
+        shortUrl: data.shortUrl,
+        createdAt: data.createdAt,
+        updatedAt: data.updatedAt ?? null,
+        clicks: data.clicks,
+        uniqueVisitors: data.uniqueVisitors?.size ?? 0,
+        analytics: data.analytics ?? {},
+        referrers: data.referrers ?? {},
+        metadata: { ...(data.metadata ?? {}) },
+        tags: [...(data.tags ?? [])],
+        expiresAt: data.expiresAt ?? null,
+        expired: !!data.expiresAt && new Date() > new Date(data.expiresAt)
+    };
+}
+
+update(code, updates = {}) {
+    code = this.normalizeCode(code);
+
+    const data = this.urls.get(code);
+    if (!data) throw new Error("Code not found");
+
+    if (updates.metadata && typeof updates.metadata === "object") {
+        data.metadata = {
+            ...(data.metadata ?? {}),
+            ...updates.metadata
         };
     }
 
-    update(code, updates = {}) {
-        code = this.normalizeCode(code);
-        const data = this.urls.get(code);
-        if (!data) throw new Error("Code not found");
+    if (Array.isArray(updates.tags)) {
+        data.tags = [
+            ...new Set([
+                ...(data.tags ?? []),
+                ...updates.tags.map(String)
+            ])
+        ];
+    }
 
-        if (updates.metadata) {
-            data.metadata = { ...data.metadata, ...updates.metadata };
+    if (updates.expiresIn !== undefined) {
+        if (!Number.isFinite(updates.expiresIn) || updates.expiresIn < 0) {
+            throw new Error("expiresIn must be a non-negative number");
         }
 
-        if (updates.tags) {
-            data.tags = Array.from(new Set([...data.tags, ...updates.tags]));
-        }
-
-        if (updates.expiresIn) {
-            data.expiresAt = new Date(Date.now() + updates.expiresIn);
-        }
-
-        return true;
+        data.expiresAt = new Date(Date.now() + updates.expiresIn);
     }
 
-    delete(code) {
-        code = this.normalizeCode(code);
-        const data = this.urls.get(code);
-        if (!data) throw new Error("Code not found");
-
-        this.urlIndex.delete(data.longUrl);
-        this.urls.delete(code);
-        return true;
+    if (updates.expiresAt !== undefined) {
+        data.expiresAt = updates.expiresAt
+            ? new Date(updates.expiresAt)
+            : null;
     }
 
-    bulkShorten(urls = []) {
-        if (!Array.isArray(urls)) {
-            throw new Error("Input must be an array of URLs");
-        }
+    data.updatedAt = new Date();
 
-        return urls.map(url => {
-            try {
-                return { url, short: this.shorten(url) };
-            } catch (err) {
-                return { url, error: err.message };
-            }
-        });
-    }
-
-    search(query = "") {
-        query = query.toLowerCase();
-        return Array.from(this.urls.values()).filter(data =>
-            data.longUrl.toLowerCase().includes(query) ||
-            data.tags.some(tag => tag.toLowerCase().includes(query))
-        );
-    }
-
-    getAllUrls({ includeExpired = false } = {}) {
-        const now = new Date();
-        return Array.from(this.urls.values()).filter(data => {
-            if (includeExpired) return true;
-            return !data.expiresAt || now <= data.expiresAt;
-        });
-    }
-
-    clear() {
-        this.urls.clear();
-        this.urlIndex.clear();
-        this.requestMap.clear();
-        return true;
-    }
+    return true;
 }
 
-module.exports = URLShortener;
+delete(code) {
+    code = this.normalizeCode(code);
+
+    const data = this.urls.get(code);
+    if (!data) throw new Error("Code not found");
+
+    this.urlIndex.delete(data.longUrl);
+    this.urls.delete(code);
+
+    return true;
+}
+
+bulkShorten(urls = []) {
+    if (!Array.isArray(urls)) {
+        throw new Error("Input must be an array of URLs");
+    }
+
+    return urls.map(url => {
+        try {
+            return {
+                url,
+                short: this.shorten(url)
+            };
+        } catch (err) {
+            return {
+                url,
+                error: err instanceof Error ? err.message : String(err)
+            };
+        }
+    });
+}
+
+search(query = "") {
+    const normalizedQuery = String(query).trim().toLowerCase();
+
+    if (!normalizedQuery) {
+        return this.getAllUrls();
+    }
+
+    return Array.from(this.urls.values()).filter(data => {
+        const longUrl = String(data.longUrl ?? "").toLowerCase();
+
+        const tags = Array.isArray(data.tags)
+            ? data.tags.map(tag => String(tag).toLowerCase())
+            : [];
+
+        return (
+            longUrl.includes(normalizedQuery) ||
+            tags.some(tag => tag.includes(normalizedQuery))
+        );
+    });
+}
+
+getAllUrls({ includeExpired = false } = {}) {
+    const now = Date.now();
+
+    return Array.from(this.urls.values()).filter(data => {
+        if (includeExpired) return true;
+
+        return !data.expiresAt ||
+            new Date(data.expiresAt).getTime() >= now;
+    });
+}
+
+clear() {
+    this.urls.clear();
+    this.urlIndex.clear();
+    this.requestMap.clear();
+
+    return true;
+}
