@@ -5,7 +5,6 @@
  * - Fail-fast safe
  * - Observable lifecycle
  */
-
 class TaskRunner {
     constructor(options = {}) {
         this.tasks = new Map();
