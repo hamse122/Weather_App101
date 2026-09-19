@@ -244,14 +244,32 @@ export function getItem(key, defaultValue = null, options = {}) {
 }
 
 /**
- * Remove item
+ * Remove item safely
+ * - Validates the key
+ * - Removes the namespaced item
+ * - Returns success status
+ * - Handles storage errors
  */
 export function removeItem(key) {
+  if (key === undefined || key === null) {
+    return false;
+  }
+
   try {
-    storage.removeItem(buildKey(key));
+    const storageKey = buildKey(String(key));
+
+    if (!storageKey) {
+      return false;
+    }
+
+    storage.removeItem(storageKey);
     return true;
   } catch (error) {
-    console.error(`Remove failed for ${key}:`, error);
+    console.error("[Storage] Remove failed:", {
+      key,
+      error: error instanceof Error ? error.message : error
+    });
+
     return false;
   }
 }
