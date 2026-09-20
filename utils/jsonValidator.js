@@ -1,16 +1,56 @@
 export class JSONValidator {
 
-    // ===============================
-    // JSON Parsing Validation
-    // ===============================
-    static validateJSON(jsonString) {
-        try {
-            const data = JSON.parse(jsonString);
-            return { isValid: true, error: null, data };
-        } catch (err) {
-            return { isValid: false, error: err.message, data: null };
-        }
+// ===============================
+// JSON Parsing & Validation
+// ===============================
+static validateJSON(jsonString, options = {}) {
+    const {
+        allowPrimitives = true,
+        requireObject = false
+    } = options;
+
+    if (typeof jsonString !== "string") {
+        return {
+            isValid: false,
+            error: "Input must be a JSON string",
+            data: null
+        };
     }
+
+    try {
+        const data = JSON.parse(jsonString);
+
+        if (!allowPrimitives &&
+            (data === null || typeof data !== "object")) {
+            return {
+                isValid: false,
+                error: "JSON must contain an object or array",
+                data: null
+            };
+        }
+
+        if (requireObject &&
+            (data === null || typeof data !== "object" || Array.isArray(data))) {
+            return {
+                isValid: false,
+                error: "JSON must contain an object",
+                data: null
+            };
+        }
+
+        return {
+            isValid: true,
+            error: null,
+            data
+        };
+    } catch (err) {
+        return {
+            isValid: false,
+            error: err instanceof Error ? err.message : String(err),
+            data: null
+        };
+    }
+}
 
     // ===============================
     // Schema Validation
