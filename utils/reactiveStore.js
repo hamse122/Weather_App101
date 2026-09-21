@@ -138,29 +138,59 @@ unsubscribe(key, callback) {
     }
   }
 
-  /* ---------------------------------- */
-  /* Batched Updates */
-  /* ---------------------------------- */
-  _queueUpdate(key) {
+/* ----------------------------------
+   Batched Updates
+---------------------------------- */
+
+_queueUpdate(key) {
+    if (key == null) return;
+
     this._pending.add(key);
 
-    if (!this._isBatching) {
-      this._isBatching = true;
-      Promise.resolve().then(() => this._flush());
-    }
-  }
+    if (this._isBatching) return;
 
-  _flush() {
+    this._isBatching = true;
+
+    queueMicrotask(() => {
+        try {
+            this._flush();
+        } catch (error) {
+            this._handleError?.(error);
+        }
+    });
+}
+
+_flush() {
+    if (!this._pending.size) {
+        this._isBatching = false;
+        return;
+    }
+
     const changedKeys = [...this._pending];
     this._pending.clear();
     this._isBatching = false;
 
-    changedKeys.forEach(key => {
-      this._notify(key);
-      this._updateComputed(key);
-    });
-  }
+    for (const key of changedKeys) {
+        try {
+            this._notify(key);
+        } catch (error) {
+            this._handleError?.(error);
+        }
+    }
 
+    for (const key of changedKeys) {
+        try {
+            this._updateComputed(key);
+        } catch (error) {
+            this._handleError?.(error);
+        }
+    }
+
+    // Process updates queued during notification/computation.
+    if (this._pending.size) {
+        this._queueUpdate(changedKeys[0]);
+    }
+}
   /* ---------------------------------- */
   /* Notify Subscribers */
   /* ---------------------------------- */
