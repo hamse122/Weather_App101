@@ -115,21 +115,43 @@ export const del = (url, options) =>
     request('DELETE', url, options);
 
 /* =========================
-   Optional Factory
+   Advanced API Client Factory
 ========================= */
 
 export function createApiClient(baseURL, defaults = {}) {
-    return {
-        get: (path, opts) =>
-            get(baseURL + path, { ...defaults, ...opts }),
+    const normalizedBaseURL = String(baseURL).replace(/\/+$/, "");
 
-        post: (path, data, opts) =>
-            post(baseURL + path, data, { ...defaults, ...opts }),
+    const mergeOptions = (opts = {}) => ({
+        ...defaults,
+        ...opts,
+        headers: {
+            ...(defaults.headers || {}),
+            ...(opts.headers || {})
+        }
+    });
 
-        put: (path, data, opts) =>
-            put(baseURL + path, data, { ...defaults, ...opts }),
+    const buildPath = path =>
+        `${normalizedBaseURL}/${String(path).replace(/^\/+/, "")}`;
 
-        del: (path, opts) =>
-            del(baseURL + path, { ...defaults, ...opts })
-    };
+    return Object.freeze({
+        get(path, opts = {}) {
+            return get(buildPath(path), mergeOptions(opts));
+        },
+
+        post(path, data, opts = {}) {
+            return post(buildPath(path), data, mergeOptions(opts));
+        },
+
+        put(path, data, opts = {}) {
+            return put(buildPath(path), data, mergeOptions(opts));
+        },
+
+        patch(path, data, opts = {}) {
+            return patch(buildPath(path), data, mergeOptions(opts));
+        },
+
+        del(path, opts = {}) {
+            return del(buildPath(path), mergeOptions(opts));
+        }
+    });
 }
