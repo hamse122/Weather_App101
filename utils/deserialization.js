@@ -156,36 +156,34 @@ export class Deserialization {
         return this.coerce(obj);
     }
 
-    // ==================================================
-    // QUERY STRING
-    // ==================================================
+// ==================================================
+// QUERY STRING
+// ==================================================
 
-    static fromQueryString(query) {
-
-        const params = new URLSearchParams(query);
-
-        const result = Object.create(null);
-
-        for (const [key, value] of params.entries()) {
-
-            const parsed = this.coerce(value);
-
-            if (key in result) {
-
-                if (!Array.isArray(result[key])) {
-                    result[key] = [result[key]];
-                }
-
-                result[key].push(parsed);
-
-            } else {
-
-                result[key] = parsed;
-            }
-        }
-
-        return result;
+static fromQueryString(query = "") {
+    if (typeof query !== "string") {
+        throw new TypeError("Query must be a string");
     }
+
+    // Accept both "?foo=bar" and "foo=bar"
+    const normalized = query.startsWith("?") ? query.slice(1) : query;
+    const params = new URLSearchParams(normalized);
+    const result = Object.create(null);
+
+    for (const [key, value] of params) {
+        const parsed = this.coerce(value);
+
+        if (Object.prototype.hasOwnProperty.call(result, key)) {
+            result[key] = Array.isArray(result[key])
+                ? [...result[key], parsed]
+                : [result[key], parsed];
+        } else {
+            result[key] = parsed;
+        }
+    }
+
+    return result;
+}
 
     // ==================================================
     // FORMDATA
