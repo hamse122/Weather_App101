@@ -188,17 +188,24 @@ export function getRelativeTime(date){
    Math
 -------------------------------- */
 
-export function add(date,{days=0,months=0,years=0}={}){
+export function add(
+  date,
+  { days = 0, months = 0, years = 0 } = {}
+) {
   const d = normalizeDate(date);
-  if(!d) return null;
+  if (!d) return null;
 
-  const r = clone(d);
+  if (![days, months, years].every(Number.isFinite)) {
+    throw new TypeError("days, months, and years must be finite numbers");
+  }
 
-  if(days) r.setDate(r.getDate()+days);
-  if(months) r.setMonth(r.getMonth()+months);
-  if(years) r.setFullYear(r.getFullYear()+years);
+  const result = clone(d);
 
-  return r;
+  if (years) result.setFullYear(result.getFullYear() + years);
+  if (months) result.setMonth(result.getMonth() + months);
+  if (days) result.setDate(result.getDate() + days);
+
+  return result;
 }
 
 export function subtract(date,opts){
