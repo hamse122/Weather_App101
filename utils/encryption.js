@@ -32,13 +32,18 @@ export class Encryption {
     // =========================
 
     static toBase64Url(bytes) {
+        if (!(bytes instanceof Uint8Array)) {
+            bytes = new Uint8Array(bytes);
+        }
+
+        if (bytes.length === 0) return "";
+
         let binary = "";
         const chunkSize = 0x8000;
 
         for (let i = 0; i < bytes.length; i += chunkSize) {
-            binary += String.fromCharCode(
-                ...bytes.subarray(i, i + chunkSize)
-            );
+            const chunk = bytes.subarray(i, i + chunkSize);
+            binary += String.fromCharCode(...chunk);
         }
 
         return btoa(binary)
@@ -48,7 +53,15 @@ export class Encryption {
     }
 
     static fromBase64Url(value) {
-        if (typeof value !== "string" || !value) {
+        if (typeof value !== "string") {
+            throw new TypeError("Base64URL value must be a string");
+        }
+
+        if (value.length === 0) {
+            return new Uint8Array(0);
+        }
+
+        if (!/^[A-Za-z0-9_-]+$/.test(value)) {
             throw new Error("Invalid Base64URL payload");
         }
 
@@ -56,7 +69,15 @@ export class Encryption {
             .replace(/-/g, "+")
             .replace(/_/g, "/");
 
-        while (str.length % 4) str += "=";
+        const remainder = str.length % 4;
+
+        if (remainder === 1) {
+            throw new Error("Invalid Base64URL payload");
+        }
+
+        if (remainder > 0) {
+            str += "=".repeat(4 - remainder);
+        }
 
         let binary;
 
