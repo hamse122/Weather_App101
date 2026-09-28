@@ -73,25 +73,36 @@ class ServiceRegistry extends EventEmitter {
         return () => this.unregister(serviceName, instanceId);
     }
 
-    /**
-     * Remove service instance
-     */
-    unregister(serviceName, instanceId) {
-        if (!this.services.has(serviceName)) return;
+/**
+ * Remove service instance
+ */
+unregister(serviceName, instanceId) {
+    const instances = this.services.get(serviceName);
 
-        const updated = this.services
-            .get(serviceName)
-            .filter(svc => svc.instanceId !== instanceId);
+    if (!instances) return false;
 
-        this.services.set(serviceName, updated);
+    const index = instances.findIndex(
+        svc => svc?.instanceId === instanceId
+    );
 
-        this.metrics.delete(instanceId);
+    if (index === -1) return false;
 
-        this.emit("unregister", {
-            serviceName,
-            instanceId
-        });
+    const [removed] = instances.splice(index, 1);
+
+    if (instances.length === 0) {
+        this.services.delete(serviceName);
     }
+
+    this.metrics?.delete(instanceId);
+
+    this.emit("unregister", {
+        serviceName,
+        instanceId,
+        instance: removed
+    });
+
+    return true;
+}
 
     /**
      * Get healthy services
