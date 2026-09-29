@@ -1,33 +1,39 @@
-/**
- * ==========================================================
- * FEATURE TOGGLE v3 + DASHBOARD UI (Single File)
- * ==========================================================
- */
-
 export class FeatureToggle {
 
     constructor(options = {}) {
-        this.environment = options.environment || "production";
-        this.cacheTTL = options.cacheTTL || 0;
-        this.enableLogs = options.enableLogs || false;
+        this.environment = options.environment ?? "production";
+        this.cacheTTL = Math.max(0, options.cacheTTL ?? 0);
+        this.enableLogs = options.enableLogs ?? false;
 
         this.features = new Map();
         this.segments = new Map();
         this.cache = new Map();
         this.auditLog = [];
 
-        this.listeners = new Set();
+        this.listeners = new Map();
         this.middlewares = [];
 
         this.frozen = false;
-        this.circuitBreaker = false; // 🚨 NEW
+        this.circuitBreaker = false;
 
         this.exposureHook = null;
 
-        // metrics
+        // Metrics
         this.metrics = new Map();
-    }
 
+        // Runtime configuration
+        this.maxAuditLogs = options.maxAuditLogs ?? 1000;
+        this.maxCacheEntries = options.maxCacheEntries ?? 5000;
+
+        // Circuit breaker configuration
+        this.circuitBreakerOptions = {
+            failureThreshold: options.failureThreshold ?? 5,
+            resetTimeout: options.resetTimeout ?? 30000,
+            failures: 0,
+            openedAt: null
+        };
+    }
+}
 /* ==================================================
    MIDDLEWARE PIPELINE (v2)
 ================================================== */
