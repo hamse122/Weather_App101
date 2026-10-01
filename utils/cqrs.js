@@ -49,7 +49,7 @@ class CQRS {
 /* -------------------- Hooks -------------------- */
 
 registerHook(type, fn, options = {}) {
-    if (!this.hooks[type]) {
+    if (!this.hooks?.[type]) {
         throw new Error(`Invalid hook: ${type}`);
     }
 
@@ -57,64 +57,70 @@ registerHook(type, fn, options = {}) {
         throw new TypeError("Hook must be a function");
     }
 
+    const id =
+        options.id ??
+        (typeof crypto !== "undefined" && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
     const hook = {
-        id: options.id ?? crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        id,
         fn,
-        priority: options.priority ?? 0,
-        once: !!options.once,
+        priority: Number(options.priority) || 0,
+        once: options.once === true,
         enabled: options.enabled !== false
     };
 
     this.hooks[type].push(hook);
-
-    // Highest priority runs first
     this.hooks[type].sort((a, b) => b.priority - a.priority);
 
-    return hook.id;
+    return id;
 }
 
 async runHooks(type, data, context = {}) {
-    const hooks = this.hooks[type];
+    const hooks = this.hooks?.[type];
 
     if (!hooks?.length) {
-        return;
+        return context;
     }
 
-    const remove = [];
+    const errors = [];
+    const removeIds = [];
 
-    for (const hook of hooks) {
-
+    // Snapshot prevents mutation during execution
+    for (const hook of [...hooks]) {
         if (!hook.enabled) continue;
 
         try {
-            await Promise.resolve(
-                hook.fn(data, context)
-            );
+            await hook.fn(data, context);
 
             if (hook.once) {
-                remove.push(hook.id);
+                removeIds.push(hook.id);
+            }
+        } catch (error) {
+            if (context.continueOnError !== true) {
+                throw error;
             }
 
-        } catch (err) {
-
-            if (context?.continueOnError !== true) {
-                throw err;
-            }
-
-            context.errors ??= [];
-            context.errors.push({
-                hook: hook.id,
-                error: err
+            errors.push({
+                hookId: hook.id,
+                error
             });
         }
     }
 
-    // Remove one-time hooks
-    if (remove.length) {
-        this.hooks[type] = hooks.filter(
-            h => !remove.includes(h.id)
+    if (removeIds.length) {
+        this.hooks[type] = this.hooks[type].filter(
+            hook => !removeIds.includes(hook.id)
         );
     }
+
+    if (errors.length) {
+        context.errors ??= [];
+        context.errors.push(...errors);
+    }
+
+    return context;
 }
 
     /* -------------------- Commands -------------------- */
