@@ -94,11 +94,11 @@ async runHooks(type, payload) {
     return this;
 }
 
-        /* =========================
-Architecture
-    ========================= */
+/* =========================
+   Architecture
+========================= */
 
-    class DataPipeline {
+class DataPipeline {
     constructor(options = {}) {
         this.stages = [];
         this.context = new Map();
@@ -108,24 +108,39 @@ Architecture
 
         this.eventListeners = new Map();
 
-        this.cache = options.cacheAdapter || new MemoryCache();
+        this.cache = options.cacheAdapter ?? new MemoryCache();
 
         this.abortController = new AbortController();
 
         this.circuitBreaker = {
             failures: 0,
-            threshold: options.breakerThreshold ?? 5,
-            resetTimeout: options.breakerReset ?? 30000,
+            threshold: Math.max(1, options.breakerThreshold ?? 5),
+            resetTimeout: Math.max(0, options.breakerReset ?? 30000),
             state: "CLOSED",
-            openedAt: null
+            openedAt: null,
+            halfOpenInProgress: false
         };
 
         this.metrics = {
             executions: 0,
+            successes: 0,
             failures: 0,
             totalTime: 0,
-            stageTimes: {}
+            stageTimes: Object.create(null),
+            cacheHits: 0,
+            cacheMisses: 0,
+            lastError: null,
+            lastExecutionAt: null
         };
+
+        this.options = {
+            name: options.name ?? "DataPipeline",
+            timeout: options.timeout ?? 0,
+            continueOnError: options.continueOnError ?? false,
+            debug: options.debug ?? false
+        };
+
+        this.createdAt = Date.now();
     }
 }
 
