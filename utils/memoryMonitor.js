@@ -32,36 +32,73 @@ export class MemoryMonitor {
         this.lastUsed = null;
     }
 
-    // --------------------------------------------------
-    // Memory Source Detection
-    // --------------------------------------------------
+// --------------------------------------------------
+// Memory Source Detection
+// --------------------------------------------------
 
-    static getMemoryUsage() {
-        if (typeof performance !== "undefined" && performance.memory) {
-            const { usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit } = performance.memory;
-            return {
-                used: usedJSHeapSize,
-                total: totalJSHeapSize,
-                limit: jsHeapSizeLimit,
-                available: jsHeapSizeLimit - usedJSHeapSize,
-                source: "browser"
-            };
-        }
+static getMemoryUsage() {
+    // Browser / Chromium
+    if (
+        typeof performance !== "undefined" &&
+        performance.memory &&
+        Number.isFinite(performance.memory.usedJSHeapSize)
+    ) {
+        const {
+            usedJSHeapSize: used,
+            totalJSHeapSize: total,
+            jsHeapSizeLimit: limit
+        } = performance.memory;
 
-        if (typeof process !== "undefined" && process.memoryUsage) {
-            const mem = process.memoryUsage();
-            return {
-                used: mem.heapUsed,
-                total: mem.heapTotal,
-                limit: mem.heapTotal || null,
-                available: mem.heapTotal ? mem.heapTotal - mem.heapUsed : null,
-                source: "node"
-            };
-        }
-
-        return null;
+        return Object.freeze({
+            used,
+            total,
+            limit,
+            available: Math.max(0, limit - used),
+            utilization: limit > 0 ? used / limit : 0,
+            utilizationPercent: limit > 0
+                ? Number(((used / limit) * 100).toFixed(2))
+                : 0,
+            source: "browser"
+        });
     }
 
+    // Node.js
+    if (
+        typeof process !== "undefined" &&
+        typeof process.memoryUsage === "function"
+    ) {
+        const mem = process.memoryUsage();
+
+        const used = Number(mem.heapUsed) || 0;
+        const total = Number(mem.heapTotal) || 0;
+
+        return Object.freeze({
+            used,
+            total,
+            limit: null,
+            available: null,
+            utilization: total > 0 ? used / total : 0,
+            utilizationPercent: total > 0
+                ? Number(((used / total) * 100).toFixed(2))
+                : 0,
+            rss: mem.rss ?? null,
+            external: mem.external ?? null,
+            arrayBuffers: mem.arrayBuffers ?? null,
+            source: "node"
+        });
+    }
+
+    // Unsupported environment
+    return Object.freeze({
+        used: null,
+        total: null,
+        limit: null,
+        available: null,
+        utilization: null,
+        utilizationPercent: null,
+        source: "unsupported"
+    });
+}
     // --------------------------------------------------
     // Control
     // --------------------------------------------------
