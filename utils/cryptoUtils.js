@@ -6,36 +6,37 @@
 class CryptoUtils {
 
 /* ---------------------------------------------------
- * ENVIRONMENT HELPERS (v2)
+ * ENVIRONMENT HELPERS (v3)
  * --------------------------------------------------- */
 
 static isBrowser() {
     return (
         typeof window !== "undefined" &&
         typeof document !== "undefined" &&
-        typeof globalThis?.crypto !== "undefined"
+        typeof globalThis.crypto !== "undefined"
     );
 }
 
 static isNode() {
     return (
         typeof process !== "undefined" &&
-        !!process.versions?.node &&
-        !process.versions?.bun &&
-        !process.versions?.deno
+        process?.release?.name === "node" &&
+        !this.isBun() &&
+        !this.isDeno()
     );
 }
 
 static isDeno() {
     return (
         typeof globalThis.Deno !== "undefined" &&
-        typeof globalThis.Deno.version !== "undefined"
+        typeof globalThis.Deno?.version?.deno === "string"
     );
 }
 
 static isBun() {
     return (
-        typeof globalThis.Bun !== "undefined"
+        typeof globalThis.Bun !== "undefined" &&
+        typeof globalThis.Bun?.version !== "undefined"
     );
 }
 
@@ -43,10 +44,10 @@ static getNodeCrypto() {
     if (!this.isNode()) return null;
 
     try {
-        return require("node:crypto"); // Modern Node.js
+        return require("node:crypto");
     } catch {
         try {
-            return require("crypto"); // Fallback
+            return require("crypto");
         } catch {
             return null;
         }
@@ -54,14 +55,23 @@ static getNodeCrypto() {
 }
 
 static getCrypto() {
-    if (typeof globalThis.crypto !== "undefined") {
+    // Browser, Deno, Bun and modern Node.js
+    if (
+        typeof globalThis.crypto !== "undefined" &&
+        typeof globalThis.crypto.getRandomValues === "function"
+    ) {
         return globalThis.crypto;
     }
 
+    // Node.js fallback
     const nodeCrypto = this.getNodeCrypto();
-    return nodeCrypto?.webcrypto ?? nodeCrypto ?? null;
-}
 
+    return (
+        nodeCrypto?.webcrypto ??
+        nodeCrypto ??
+        null
+    );
+}
 
     /* ---------------------------------------------------
      * BASE64 / BASE64 URL
