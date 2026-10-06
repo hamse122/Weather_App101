@@ -112,15 +112,21 @@ clearConfiguration() {
 ========================== */
 
 async handle(error, context = {}) {
-    const payload = Object.freeze(
-        typeof structuredClone === "function"
-            ? structuredClone(this._buildPayload(error, context))
-            : { ...this._buildPayload(error, context) }
-    );
+    const payloadSource = this._buildPayload(error, context);
 
-    if (!this._allowLog()) {
-        return null;
+    let payload;
+
+    try {
+        payload = Object.freeze(
+            typeof structuredClone === "function"
+                ? structuredClone(payloadSource)
+                : { ...payloadSource }
+        );
+    } catch {
+        payload = Object.freeze({ ...payloadSource });
     }
+
+    if (!this._allowLog()) return null;
 
     const start =
         typeof performance !== "undefined"
@@ -128,14 +134,23 @@ async handle(error, context = {}) {
             : Date.now();
 
     try {
-        // Notify subscribers (isolated)
-        await Promise.allSettled(
+        // Notify subscribers independently
+        const subscriberResults = await Promise.allSettled(
             [...this.subscribers].map(sub =>
                 Promise.resolve().then(() => sub(payload))
             )
         );
 
-        // Send to transports concurrently
+        subscriberResults.forEach(result => {
+            if (result.status === "rejected") {
+                console.error(
+                    "[ErrorHandler] Subscriber failed:",
+                    result.reason
+                );
+            }
+        });
+
+        // Execute transports concurrently
         const transportResults = await Promise.allSettled(
             this.transports.map(transport =>
                 Promise.resolve().then(() => transport(payload))
@@ -144,28 +159,61 @@ async handle(error, context = {}) {
 
         transportResults.forEach(result => {
             if (result.status === "rejected") {
-                console.error("[ErrorHandler] Transport failed:", result.reason);
+                console.error(
+                    "[ErrorHandler] Transport failed:",
+                    result.reason
+                );
             }
         });
 
-        // Internal logger should never break handling
+        // Logger is isolated from the main error flow
         try {
-            await Promise.resolve(this.logger(payload));
+            await Promise.resolve(this.logger?.(payload));
         } catch (err) {
             console.error("[ErrorHandler] Logger failed:", err);
         }
 
+        // Resolve type-specific handler
         const entry =
             this.handlers.get(payload.type) ??
             this.handlers.get("default");
 
         if (!entry) {
-            return this.globalFallback
-                ? await this.globalFallback(error, context)
-                : null;
+            if (typeof this.globalFallback === "function") {
+                try {
+                    return await this.globalFallback(error, context);
+                } catch (fallbackError) {
+                    console.error(
+                        "[ErrorHandler] Fallback failed:",
+                        fallbackError
+                    );
+                }
+            }
+
+            return null;
         }
 
-        return await this._executeWithResilience(entry, error, context);
+        return await this._executeWithResilience(
+            entry,
+            error,
+            context
+        );
+
+    } catch (err) {
+        console.error("[ErrorHandler] Handling failed:", err);
+
+        if (typeof this.globalFallback === "function") {
+            try {
+                return await this.globalFallback(error, context);
+            } catch (fallbackError) {
+                console.error(
+                    "[ErrorHandler] Global fallback failed:",
+                    fallbackError
+                );
+            }
+        }
+
+        return null;
 
     } finally {
         this.metrics ??= {
@@ -174,12 +222,13 @@ async handle(error, context = {}) {
             lastHandledAt: null
         };
 
-        this.metrics.handled++;
-        this.metrics.totalTime +=
-            (typeof performance !== "undefined"
+        const end =
+            typeof performance !== "undefined"
                 ? performance.now()
-                : Date.now()) - start;
+                : Date.now();
 
+        this.metrics.handled++;
+        this.metrics.totalTime += end - start;
         this.metrics.lastHandledAt = Date.now();
     }
 }
