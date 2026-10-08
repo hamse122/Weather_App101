@@ -1,414 +1,854 @@
 /**
- * Configuration Manager Utility
- * Advanced configuration management system for application settings
+ * Advanced Configuration Manager
+ * 2026 Edition
+ *
+ * Features:
+ * - Defaults + runtime configuration
+ * - Deep merge
+ * - Nested paths
+ * - Per-key validation
+ * - Global validation
+ * - localStorage / sessionStorage / custom storage
+ * - Async storage support
+ * - Auto persistence
+ * - Change subscriptions
+ * - Per-key subscriptions
+ * - Transactions
+ * - Batch updates
+ * - Reset / clear
+ * - Locking
+ * - Immutable snapshots
+ * - Safe listener execution
+ * - Import / export
+ * - Versioning
  */
 
-/**
- * @template {Record<string, any>} T
- */
 export class ConfigurationManager {
-    /**
-     * @param {Object} [options]
-     * @param {T} [options.defaults] - Initial default configuration
-     * @param {string} [options.storageKey] - Default storage key
-     * @param {Storage|null} [options.storage] - Custom storage (e.g. localStorage, sessionStorage)
-     */
     constructor(options = {}) {
-        /** @type {T} */
-        this.config = /** @type {T} */ ({});
-        /** @type {T} */
-        this.defaults = /** @type {T} */ (options.defaults || {});
-        
-        /** @type {Set<Function>} */
+        this.config = {};
+        this.defaults = options.defaults || {};
+
+        this.storageKey = options.storageKey || "app_config";
+        this.storage = this.resolveStorage(options.storage);
+
+        this.autoSave = options.autoSave ?? false;
+        this.deepMergeEnabled = options.deepMerge ?? true;
+
         this.listeners = new Set();
-        /** @type {Map<string, Set<Function>>} */
-        this.keyListeners = new Map(); // per-key listeners
+        this.keyListeners = new Map();
+        this.validators = new Map();
 
-        this.storageKey = options.storageKey || 'app_config';
-        this.storage = typeof window !== 'undefined' && options.storage !== null
-            ? (options.storage || window.localStorage)
-            : null;
+        this.globalValidators = new Set();
 
-        /** @type {Map<string, (value: any) => boolean>} */
-        this.validators = new Map(); // optional per-key validators
+        this.locked = false;
+        this.transactionDepth = 0;
+        this.transactionChanges = [];
+
+        this.version = 0;
+
+        this.onError =
+            options.onError ||
+            ((error) => {
+                console.error("[ConfigurationManager]", error);
+            });
     }
 
-    // ############## INTERNAL HELPERS ##############
+    /* ============================================================
+       STORAGE
+    ============================================================ */
 
-    /**
-     * @param {any} value
-     * @returns {boolean}
-     */
-    static isPlainObject(value) {
-        return Object.prototype.toString.call(value) === '[object Object]';
-    }
+    resolveStorage(storage) {
+        if (storage !== undefined) return storage;
 
-    /**
-     * Deep merge utility (mutates target)
-     * @param {Object} target
-     * @param {Object} source
-     * @returns {Object}
-     */
-    static deepMerge(target, source) {
-        for (const key of Object.keys(source)) {
-            const srcVal = source[key];
-            const tgtVal = target[key];
-
-            if (ConfigurationManager.isPlainObject(srcVal) && ConfigurationManager.isPlainObject(tgtVal)) {
-                ConfigurationManager.deepMerge(tgtVal, srcVal);
-            } else {
-                target[key] = srcVal;
+        if (typeof window !== "undefined") {
+            try {
+                return window.localStorage;
+            } catch {
+                return null;
             }
         }
-        return target;
+
+        return null;
     }
 
-    /**
-     * Optional validation before setting a value
-     * @param {string} key
-     * @param {*} value
-     * @throws {Error} if validation fails
-     */
-    validate(key, value) {
-        const validator = this.validators.get(key);
-        if (validator && !validator(value)) {
-            throw new Error(`Validation failed for configuration key "${key}"`);
+    async persist() {
+        if (!this.autoSave || !this.storage) return;
+
+        const data = JSON.stringify(this.config);
+
+        try {
+            if (typeof this.storage.setItem === "function") {
+                const result = this.storage.setItem(
+                    this.storageKey,
+                    data
+                );
+
+                if (result instanceof Promise) {
+                    await result;
+                }
+
+                return;
+            }
+
+            if (typeof this.storage.set === "function") {
+                await this.storage.set(this.storageKey, data);
+            }
+        } catch (error) {
+            this.onError(error);
         }
     }
 
-    // ############## CORE API ##############
+    async loadFromStorage(options = {}) {
+        if (!this.storage) return this;
 
-    /**
-     * Register a validator for a key
-     * @param {string} key
-     * @param {(value:any) => boolean} validator
-     */
-    setValidator(key, validator) {
-        this.validators.set(key, validator);
-    }
+        try {
+            let raw;
 
-/**
- * Set a configuration value
- */
-async set(key, value, options = {}) {
-    this.ensureMutable();
+            if (typeof this.storage.getItem === "function") {
+                raw = this.storage.getItem(this.storageKey);
+            } else if (typeof this.storage.get === "function") {
+                raw = await this.storage.get(this.storageKey);
+            }
 
-    if (typeof key !== 'string' || !key.trim()) {
-        throw new TypeError('Configuration key must be a non-empty string.');
-    }
+            if (raw instanceof Promise) {
+                raw = await raw;
+            }
 
-    if (key.includes('.')) {
-        return this.setPath(key, value, options);
-    }
+            if (!raw) return this;
 
-    this.validate(key, value);
+            const parsed =
+                typeof raw === "string"
+                    ? JSON.parse(raw)
+                    : raw;
 
-    const previous = this.config[key];
+            this.load(parsed, options);
+        } catch (error) {
+            this.onError(error);
+        }
 
-    // Skip if value didn't change
-    if (!options.force && Object.is(previous, value)) {
         return this;
     }
 
-    this.config[key] = value;
+    async clearStorage() {
+        if (!this.storage) return;
 
-    // Persist if enabled
-    const result = this.autoPersist();
-    if (result instanceof Promise) {
-        await result;
-    }
+        try {
+            if (typeof this.storage.removeItem === "function") {
+                const result = this.storage.removeItem(
+                    this.storageKey
+                );
 
-    // Notify listeners unless silenced
-    if (!options.silent) {
-        this.notifyListeners(key, value, 'set', previous);
-    }
+                if (result instanceof Promise) {
+                    await result;
+                }
 
-    return this;
-}
-    /**
-     * Set multiple configuration values at once
-     * @param {Partial<T>} values
-     * @param {{silent?: boolean}} [options]
-     */
-    setMany(values, options = {}) {
-        const prevAll = this.getAll();
-        Object.entries(values).forEach(([key, value]) => {
-            // @ts-ignore
-            this.validate(key, value);
-            // @ts-ignore
-            this.config[key] = value;
-        });
-        if (!options.silent) {
-            this.notifyListeners(null, null, 'setMany', prevAll);
+                return;
+            }
+
+            if (typeof this.storage.delete === "function") {
+                await this.storage.delete(this.storageKey);
+            }
+        } catch (error) {
+            this.onError(error);
         }
     }
 
-    /**
-     * Get a configuration value
-     * @param {keyof T & string} key - Configuration key
-     * @param {T[keyof T] | null} [defaultValue=null] - Default value if key doesn't exist
-     * @returns {T[keyof T] | null} - Configuration value
-     */
+    /* ============================================================
+       HELPERS
+    ============================================================ */
+
+    static isPlainObject(value) {
+        return (
+            value !== null &&
+            typeof value === "object" &&
+            Object.getPrototypeOf(value) === Object.prototype
+        );
+    }
+
+    static deepClone(value) {
+        if (typeof structuredClone === "function") {
+            return structuredClone(value);
+        }
+
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    static deepMerge(target, source) {
+        for (const key of Object.keys(source)) {
+            const sourceValue = source[key];
+            const targetValue = target[key];
+
+            if (
+                ConfigurationManager.isPlainObject(sourceValue) &&
+                ConfigurationManager.isPlainObject(targetValue)
+            ) {
+                ConfigurationManager.deepMerge(
+                    targetValue,
+                    sourceValue
+                );
+            } else if (
+                ConfigurationManager.isPlainObject(sourceValue)
+            ) {
+                target[key] = ConfigurationManager.deepMerge(
+                    {},
+                    sourceValue
+                );
+            } else {
+                target[key] = sourceValue;
+            }
+        }
+
+        return target;
+    }
+
+    getAll() {
+        return ConfigurationManager.deepMerge(
+            ConfigurationManager.deepClone(this.defaults),
+            ConfigurationManager.deepClone(this.config)
+        );
+    }
+
+    ensureMutable() {
+        if (this.locked) {
+            throw new Error(
+                "ConfigurationManager is locked and cannot be modified."
+            );
+        }
+    }
+
+    validateKey(key) {
+        if (
+            typeof key !== "string" ||
+            !key.trim()
+        ) {
+            throw new TypeError(
+                "Configuration key must be a non-empty string."
+            );
+        }
+    }
+
+    validate(key, value) {
+        const validator = this.validators.get(key);
+
+        if (validator && !validator(value)) {
+            throw new Error(
+                `Validation failed for configuration key "${key}".`
+            );
+        }
+
+        for (const globalValidator of this.globalValidators) {
+            if (!globalValidator(this.getAll(), key, value)) {
+                throw new Error(
+                    `Global configuration validation failed for "${key}".`
+                );
+            }
+        }
+    }
+
+    /* ============================================================
+       VALIDATION
+    ============================================================ */
+
+    setValidator(key, validator) {
+        this.validateKey(key);
+
+        if (typeof validator !== "function") {
+            throw new TypeError(
+                "Validator must be a function."
+            );
+        }
+
+        this.validators.set(key, validator);
+
+        return this;
+    }
+
+    removeValidator(key) {
+        this.validators.delete(key);
+        return this;
+    }
+
+    addGlobalValidator(validator) {
+        if (typeof validator !== "function") {
+            throw new TypeError(
+                "Global validator must be a function."
+            );
+        }
+
+        this.globalValidators.add(validator);
+
+        return () => {
+            this.globalValidators.delete(validator);
+        };
+    }
+
+    /* ============================================================
+       GET
+    ============================================================ */
+
     get(key, defaultValue = null) {
+        this.validateKey(key);
+
         if (key in this.config) {
             return this.config[key];
         }
+
         if (key in this.defaults) {
             return this.defaults[key];
         }
+
         return defaultValue;
     }
 
-    /**
-     * Get a nested configuration value via path (e.g. "theme.colors.primary")
-     * @param {string} path
-     * @param {*} [defaultValue=null]
-     * @returns {*}
-     */
     getPath(path, defaultValue = null) {
-        const keys = path.split('.');
-        let obj = this.getAll();
-        for (const k of keys) {
-            if (obj && typeof obj === 'object' && k in obj) {
-                obj = obj[k];
-            } else {
+        this.validateKey(path);
+
+        let current = this.getAll();
+
+        for (const key of path.split(".")) {
+            if (
+                current === null ||
+                current === undefined ||
+                typeof current !== "object" ||
+                !(key in current)
+            ) {
                 return defaultValue;
             }
+
+            current = current[key];
         }
-        return obj;
+
+        return current;
     }
 
-    /**
-     * Set a nested configuration value via path (e.g. "theme.colors.primary")
-     * @param {string} path
-     * @param {*} value
-     * @param {{silent?: boolean}} [options]
-     */
-    setPath(path, value, options = {}) {
-        const keys = path.split('.');
-        const lastKey = keys.pop();
-        if (!lastKey) return;
-
-        /** @type {any} */
-        let obj = this.config;
-        for (const k of keys) {
-            if (!ConfigurationManager.isPlainObject(obj[k])) {
-                obj[k] = {};
-            }
-            obj = obj[k];
-        }
-        const previous = obj[lastKey];
-        obj[lastKey] = value;
-        if (!options.silent) {
-            this.notifyListeners(path, value, 'setPath', previous);
-        }
-    }
-
-    /**
-     * Set default value
-     * @param {keyof T & string} key - Configuration key
-     * @param {T[keyof T]} value - Default value
-     */
-    setDefault(key, value) {
-        this.defaults[key] = value;
-    }
-
-    /**
-     * Set many defaults at once
-     * @param {Partial<T>} defaults
-     */
-    setDefaults(defaults) {
-        this.defaults = /** @type {T} */ ({
-            ...this.defaults,
-            ...defaults,
-        });
-    }
-
-    /**
-     * Check if a configuration key exists
-     * @param {keyof T & string} key - Configuration key
-     * @returns {boolean} - True if key exists
-     */
     has(key) {
-        return key in this.config || key in this.defaults;
+        return (
+            key in this.config ||
+            key in this.defaults
+        );
     }
 
-    /**
-     * Remove a configuration key
-     * @param {keyof T & string} key - Configuration key
-     * @param {{silent?: boolean}} [options]
-     */
-    remove(key, options = {}) {
-        const existed = key in this.config;
+    /* ============================================================
+       SET
+    ============================================================ */
+
+    async set(key, value, options = {}) {
+        this.ensureMutable();
+        this.validateKey(key);
+
+        if (key.includes(".")) {
+            return this.setPath(key, value, options);
+        }
+
+        this.validate(key, value);
+
         const previous = this.config[key];
+
+        if (
+            !options.force &&
+            Object.is(previous, value)
+        ) {
+            return this;
+        }
+
+        this.config[key] = value;
+        this.version++;
+
+        if (!options.silent) {
+            this.notifyListeners(
+                key,
+                value,
+                "set",
+                previous
+            );
+        }
+
+        if (this.transactionDepth === 0) {
+            await this.persist();
+        }
+
+        return this;
+    }
+
+    async setMany(values, options = {}) {
+        this.ensureMutable();
+
+        if (
+            !values ||
+            typeof values !== "object"
+        ) {
+            throw new TypeError(
+                "Configuration values must be an object."
+            );
+        }
+
+        const previous = this.getAll();
+
+        for (const [key, value] of Object.entries(values)) {
+            this.validate(key, value);
+        }
+
+        Object.assign(this.config, values);
+
+        this.version++;
+
+        if (!options.silent) {
+            this.notifyListeners(
+                null,
+                values,
+                "setMany",
+                previous
+            );
+        }
+
+        if (this.transactionDepth === 0) {
+            await this.persist();
+        }
+
+        return this;
+    }
+
+    async setPath(path, value, options = {}) {
+        this.ensureMutable();
+        this.validateKey(path);
+
+        const keys = path.split(".");
+        const lastKey = keys.pop();
+
+        let target = this.config;
+
+        for (const key of keys) {
+            if (
+                !ConfigurationManager.isPlainObject(
+                    target[key]
+                )
+            ) {
+                target[key] = {};
+            }
+
+            target = target[key];
+        }
+
+        this.validate(path, value);
+
+        const previous = target[lastKey];
+
+        if (
+            !options.force &&
+            Object.is(previous, value)
+        ) {
+            return this;
+        }
+
+        target[lastKey] = value;
+        this.version++;
+
+        if (!options.silent) {
+            this.notifyListeners(
+                path,
+                value,
+                "setPath",
+                previous
+            );
+        }
+
+        if (this.transactionDepth === 0) {
+            await this.persist();
+        }
+
+        return this;
+    }
+
+    /* ============================================================
+       REMOVE
+    ============================================================ */
+
+    async remove(key, options = {}) {
+        this.ensureMutable();
+        this.validateKey(key);
+
+        if (key.includes(".")) {
+            return this.removePath(key, options);
+        }
+
+        if (!(key in this.config)) {
+            return this;
+        }
+
+        const previous = this.config[key];
+
         delete this.config[key];
+        this.version++;
 
-        if (existed && !options.silent) {
-            this.notifyListeners(key, undefined, 'remove', previous);
+        if (!options.silent) {
+            this.notifyListeners(
+                key,
+                undefined,
+                "remove",
+                previous
+            );
         }
+
+        if (this.transactionDepth === 0) {
+            await this.persist();
+        }
+
+        return this;
     }
 
-    /**
-     * Load configuration from object
-     * @param {Partial<T>} config - Configuration object
-     * @param {Object} [options]
-     * @param {boolean} [options.merge=true] - Whether to merge with existing config
-     * @param {boolean} [options.deep=true] - Use deep merge
-     */
-    load(config, { merge = true, deep = true } = {}) {
+    async removePath(path, options = {}) {
+        this.ensureMutable();
+
+        const keys = path.split(".");
+        const lastKey = keys.pop();
+
+        let target = this.config;
+
+        for (const key of keys) {
+            if (
+                !target ||
+                typeof target !== "object" ||
+                !(key in target)
+            ) {
+                return this;
+            }
+
+            target = target[key];
+        }
+
+        if (!(lastKey in target)) {
+            return this;
+        }
+
+        const previous = target[lastKey];
+
+        delete target[lastKey];
+        this.version++;
+
+        if (!options.silent) {
+            this.notifyListeners(
+                path,
+                undefined,
+                "removePath",
+                previous
+            );
+        }
+
+        if (this.transactionDepth === 0) {
+            await this.persist();
+        }
+
+        return this;
+    }
+
+    /* ============================================================
+       DEFAULTS
+    ============================================================ */
+
+    setDefault(key, value) {
+        this.ensureMutable();
+        this.validateKey(key);
+
+        this.defaults[key] = value;
+
+        return this;
+    }
+
+    setDefaults(defaults, { deep = true } = {}) {
+        this.ensureMutable();
+
+        this.defaults = deep
+            ? ConfigurationManager.deepMerge(
+                  this.defaults,
+                  defaults
+              )
+            : {
+                  ...this.defaults,
+                  ...defaults
+              };
+
+        return this;
+    }
+
+    /* ============================================================
+       LOAD / RESET
+    ============================================================ */
+
+    load(
+        config,
+        {
+            merge = true,
+            deep = true,
+            silent = false
+        } = {}
+    ) {
+        this.ensureMutable();
+
+        const previous = this.getAll();
+
         if (!merge) {
-            this.config = /** @type {T} */ ({ ...config });
+            this.config =
+                ConfigurationManager.deepClone(config);
         } else if (deep) {
-            this.config = ConfigurationManager.deepMerge({ ...this.config }, config);
+            this.config =
+                ConfigurationManager.deepMerge(
+                    ConfigurationManager.deepClone(
+                        this.config
+                    ),
+                    config
+                );
         } else {
-            this.config = /** @type {T} */ ({ ...this.config, ...config });
+            this.config = {
+                ...this.config,
+                ...config
+            };
         }
-        this.notifyListeners(null, null, 'load', null);
+
+        this.version++;
+
+        if (!silent) {
+            this.notifyListeners(
+                null,
+                this.getAll(),
+                "load",
+                previous
+            );
+        }
+
+        return this;
     }
 
-    /**
-     * Get all configuration (defaults overridden by current config)
-     * @returns {T} - New object with combined config
-     */
-    getAll() {
-        return /** @type {T} */ ({
-            ...this.defaults,
-            ...this.config,
-        });
+    reset({ silent = false } = {}) {
+        this.ensureMutable();
+
+        const previous = this.getAll();
+
+        this.config = {};
+        this.version++;
+
+        if (!silent) {
+            this.notifyListeners(
+                null,
+                this.getAll(),
+                "reset",
+                previous
+            );
+        }
+
+        return this;
     }
 
-    /**
-     * Reset configuration to defaults
-     */
-    reset() {
-        const prevAll = this.getAll();
-        this.config = /** @type {T} */ ({});
-        this.notifyListeners(null, null, 'reset', prevAll);
+    clearAll({ silent = false } = {}) {
+        this.ensureMutable();
+
+        const previous = this.getAll();
+
+        this.config = {};
+        this.defaults = {};
+        this.version++;
+
+        if (!silent) {
+            this.notifyListeners(
+                null,
+                {},
+                "clearAll",
+                previous
+            );
+        }
+
+        return this;
     }
 
-    /**
-     * Completely clear config and defaults
-     */
-    clearAll() {
-        const prevAll = this.getAll();
-        this.config = /** @type {T} */ ({});
-        this.defaults = /** @type {T} */ ({});
-        this.notifyListeners(null, null, 'clearAll', prevAll);
+    /* ============================================================
+       TRANSACTIONS
+    ============================================================ */
+
+    async transaction(callback) {
+        this.ensureMutable();
+
+        const snapshot =
+            ConfigurationManager.deepClone(
+                this.config
+            );
+
+        this.transactionDepth++;
+
+        try {
+            const result = await callback(this);
+
+            this.transactionDepth--;
+
+            if (this.transactionDepth === 0) {
+                await this.persist();
+            }
+
+            return result;
+        } catch (error) {
+            this.config = snapshot;
+            this.transactionDepth--;
+
+            throw error;
+        }
     }
 
-    // ############## EVENTS ##############
+    /* ============================================================
+       EVENTS
+    ============================================================ */
 
-    /**
-     * Subscribe to configuration changes (any key)
-     * @param {(event: { key: string|null, value: any, previous: any, action: string, config: T }) => void} listener
-     * @returns {Function} - Unsubscribe function
-     */
     subscribe(listener) {
+        if (typeof listener !== "function") {
+            throw new TypeError(
+                "Listener must be a function."
+            );
+        }
+
         this.listeners.add(listener);
+
         return () => {
             this.listeners.delete(listener);
         };
     }
 
-    /**
-     * Subscribe to changes of a specific key
-     * @param {string} key
-     * @param {(event: { key: string|null, value: any, previous: any, action: string, config: T }) => void} listener
-     * @returns {Function} - Unsubscribe function
-     */
     subscribeKey(key, listener) {
-        if (!this.keyListeners.has(key)) {
-            this.keyListeners.set(key, new Set());
+        this.validateKey(key);
+
+        if (typeof listener !== "function") {
+            throw new TypeError(
+                "Listener must be a function."
+            );
         }
-        const set = this.keyListeners.get(key);
-        set.add(listener);
+
+        if (!this.keyListeners.has(key)) {
+            this.keyListeners.set(
+                key,
+                new Set()
+            );
+        }
+
+        const listeners =
+            this.keyListeners.get(key);
+
+        listeners.add(listener);
 
         return () => {
-            set.delete(listener);
-            if (set.size === 0) {
+            listeners.delete(listener);
+
+            if (!listeners.size) {
                 this.keyListeners.delete(key);
             }
         };
     }
 
-    /**
-     * Notify all listeners
-     * @param {string|null} key - Configuration key
-     * @param {*} value - Configuration value
-     * @param {string} action - Action type
-     * @param {*} [previous] - Previous value
-     */
-    notifyListeners(key, value, action = 'set', previous = undefined) {
-        const event = {
+    notifyListeners(
+        key,
+        value,
+        action,
+        previous
+    ) {
+        const event = Object.freeze({
             key,
             value,
             previous,
             action,
+            version: this.version,
             config: this.getAll(),
-        };
+            timestamp: Date.now()
+        });
 
-        this.listeners.forEach(listener => listener(event));
-
-        if (key && this.keyListeners.has(key)) {
-            this.keyListeners.get(key).forEach(listener => listener(event));
-        }
-    }
-
-    // ############## STORAGE HELPERS ##############
-
-    /**
-     * Save configuration to storage (without defaults)
-     * @param {string} [key] - Storage key override
-     */
-    saveToStorage(key = this.storageKey) {
-        if (!this.storage) return;
-        try {
-            this.storage.setItem(key, JSON.stringify(this.config));
-        } catch (error) {
-            console.error('Failed to save configuration to storage:', error);
-        }
-    }
-
-    /**
-     * Load configuration from storage
-     * @param {string} [key] - Storage key override
-     * @param {{merge?: boolean, deep?: boolean}} [options]
-     */
-    loadFromStorage(key = this.storageKey, options = {}) {
-        if (!this.storage) return;
-        try {
-            const stored = this.storage.getItem(key);
-            if (stored) {
-                const parsed = JSON.parse(stored);
-                this.load(parsed, options);
+        for (const listener of this.listeners) {
+            try {
+                listener(event);
+            } catch (error) {
+                this.onError(error);
             }
-        } catch (error) {
-            console.error('Failed to load configuration from storage:', error);
+        }
+
+        if (
+            key &&
+            this.keyListeners.has(key)
+        ) {
+            for (const listener of this.keyListeners.get(
+                key
+            )) {
+                try {
+                    listener(event);
+                } catch (error) {
+                    this.onError(error);
+                }
+            }
         }
     }
 
-    /**
-     * Export configuration (config only, no defaults) as JSON string
-     * @returns {string}
-     */
+    /* ============================================================
+       LOCKING
+    ============================================================ */
+
+    lock() {
+        this.locked = true;
+        return this;
+    }
+
+    unlock() {
+        this.locked = false;
+        return this;
+    }
+
+    isLocked() {
+        return this.locked;
+    }
+
+    /* ============================================================
+       SERIALIZATION
+    ============================================================ */
+
     toJSON() {
         return JSON.stringify(this.config);
     }
 
-    /**
-     * Import configuration from JSON string
-     * @param {string} json
-     * @param {{merge?: boolean, deep?: boolean}} [options]
-     */
-    fromJSON(json, options = {}) {
+    fromJSON(
+        json,
+        options = {}
+    ) {
         try {
             const parsed = JSON.parse(json);
-            this.load(parsed, options);
+
+            this.load(
+                parsed,
+                options
+            );
+
+            return this;
         } catch (error) {
-            console.error('Failed to parse configuration JSON:', error);
+            this.onError(error);
+            throw error;
         }
+    }
+
+    export() {
+        return ConfigurationManager.deepClone(
+            this.config
+        );
+    }
+
+    snapshot() {
+        return Object.freeze(
+            ConfigurationManager.deepClone(
+                this.getAll()
+            )
+        );
+    }
+
+    getVersion() {
+        return this.version;
     }
 }
 
-// Global configuration manager instance (generic “any” config)
-export const configManager = new ConfigurationManager();
+/* ================================================================
+   GLOBAL INSTANCE
+================================================================ */
+
+export const configManager =
+    new ConfigurationManager({
+        storageKey: "app_config",
+        autoSave: true
+    });
