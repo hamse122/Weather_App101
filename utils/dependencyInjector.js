@@ -219,69 +219,94 @@ class DependencyInjector {
         return instance;
     }
 
-    /* =========================
-       SCOPES
-    ========================== */
+/* =========================
+   SCOPES & LIFECYCLE
+========================== */
 
-    createScope() {
-        this.ensureAlive();
+createScope() {
+    this.ensureAlive();
 
-        return new DependencyInjector({
-            strict: this.strict,
-            parent: this
-        });
-    }
+    const scope = new DependencyInjector({
+        strict: this.strict,
+        parent: this
+    });
 
-    async destroyScope() {
-        if (this.destroyed) return;
+    this.dispatchEvent?.("scopeCreated", { scope });
 
-        for (const [name, instance] of this.scopedCache) {
+    return scope;
+}
+
+async destroyScope() {
+    if (this.destroyed) return;
+
+    this.destroyed = true;
+    const errors = [];
+
+    try {
+        for (const [name, instancePromise] of [...this.scopedCache].reverse()) {
             const provider = this.getProvider(name);
 
-            if (!provider || !provider.onDestroy) continue;
+            if (!provider?.onDestroy) continue;
 
             try {
-                const resolvedInstance = await instance;
-
-                await provider.onDestroy(resolvedInstance);
+                const instance = await instancePromise;
+                await provider.onDestroy(instance);
             } catch (error) {
+                errors.push({ name, error });
                 console.error(
-                    `Failed to destroy scoped service '${name}':`,
+                    `[DI] Failed to destroy scoped service '${name}':`,
                     error
                 );
             }
         }
-
+    } finally {
         this.scopedCache.clear();
-        this.destroyed = true;
+        this.aliases.clear();
     }
 
-    async destroyAll() {
-        if (this.parent) {
-            throw new Error(
-                "destroyAll() can only be called on the root container"
+    if (errors.length) {
+        throw new AggregateError(
+            errors.map(item => item.error),
+            `Failed to destroy ${errors.length} scoped service(s)`
+        );
+    }
+}
+
+async destroyAll() {
+    if (this.parent) {
+        throw new Error(
+            "destroyAll() can only be called on the root container"
+        );
+    }
+
+    const errors = [];
+
+    for (const [name, instancePromise] of [...this.singletons].reverse()) {
+        const provider = this.getProvider(name);
+
+        if (!provider?.onDestroy) continue;
+
+        try {
+            const instance = await instancePromise;
+            await provider.onDestroy(instance);
+        } catch (error) {
+            errors.push(error);
+            console.error(
+                `[DI] Failed to destroy singleton '${name}':`,
+                error
             );
         }
-
-        for (const [name, instance] of this.singletons) {
-            const provider = this.getProvider(name);
-
-            if (!provider || !provider.onDestroy) continue;
-
-            try {
-                const resolvedInstance = await instance;
-
-                await provider.onDestroy(resolvedInstance);
-            } catch (error) {
-                console.error(
-                    `Failed to destroy singleton '${name}':`,
-                    error
-                );
-            }
-        }
-
-        this.singletons.clear();
     }
+
+    this.singletons.clear();
+
+    if (errors.length) {
+        throw new AggregateError(
+            errors,
+            `Failed to destroy ${errors.length} singleton service(s)`
+        );
+    }
+}
 
     /* =========================
        INTERNALS
