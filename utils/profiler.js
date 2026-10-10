@@ -224,37 +224,48 @@ export class Profiler {
         };
     }
 
-    /* ---------------------------------- */
-    /* Reporting */
-    /* ---------------------------------- */
+/* ----------------------------------
+   Reporting
+---------------------------------- */
 
-    getReport() {
-        const results = this.getResults();
+getReport() {
+    const results = this.getResults();
+    const lines = [
+        "Profiler Report",
+        "=".repeat(60),
+        `Generated At : ${new Date().toISOString()}`,
+        `Total Profiles: ${results.length}`,
+        ""
+    ];
 
-        let report = "Profiler Report\n";
-        report += "============================\n\n";
-
-        if (!results.length) {
-            return report + "No profiling data available.\n";
-        }
-
-        for (const p of results) {
-            report += `${p.name}\n`;
-            report += `  Calls        : ${p.callCount}\n`;
-            report += `  Errors       : ${p.errorCount}\n`;
-            report += `  Total Time   : ${p.totalTime.toFixed(3)} ms\n`;
-            report += `  Avg Time     : ${p.averageTime.toFixed(3)} ms\n`;
-            report += `  Min Time     : ${p.minTime.toFixed(3)} ms\n`;
-            report += `  Max Time     : ${p.maxTime.toFixed(3)} ms\n`;
-            report += `  Last Time    : ${p.lastTime.toFixed(3)} ms\n`;
-            report += `  % Runtime    : ${p.percentTime.toFixed(2)}%\n`;
-            report += `  Slow Calls   : ${p.slowCalls}\n`;
-            report += `  Max Depth    : ${p.maxDepth}\n\n`;
-        }
-
-        return report;
+    if (!results.length) {
+        lines.push("No profiling data available.");
+        return lines.join("\n");
     }
 
+    const format = (value, digits = 3) =>
+        Number.isFinite(value) ? value.toFixed(digits) : "N/A";
+
+    for (const p of results) {
+        lines.push(
+            p.name,
+            "-".repeat(Math.min(Math.max(String(p.name).length, 10), 60)),
+            `  Calls        : ${p.callCount ?? 0}`,
+            `  Errors       : ${p.errorCount ?? 0}`,
+            `  Total Time   : ${format(p.totalTime)} ms`,
+            `  Avg Time     : ${format(p.averageTime)} ms`,
+            `  Min Time     : ${format(p.minTime)} ms`,
+            `  Max Time     : ${format(p.maxTime)} ms`,
+            `  Last Time    : ${format(p.lastTime)} ms`,
+            `  % Runtime    : ${format(p.percentTime, 2)}%`,
+            `  Slow Calls   : ${p.slowCalls ?? 0}`,
+            `  Max Depth    : ${p.maxDepth ?? 0}`,
+            ""
+        );
+    }
+
+    return lines.join("\n");
+}
     /* ---------------------------------- */
     /* Debug Helpers */
     /* ---------------------------------- */
