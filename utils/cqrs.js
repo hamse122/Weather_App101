@@ -123,33 +123,55 @@ async runHooks(type, data, context = {}) {
     return context;
 }
 
-    /* -------------------- Commands -------------------- */
-
-    registerCommand(name, handler) {
-        if (typeof handler.execute !== 'function') {
-            throw new Error(`Command handler ${name} must implement execute()`);
-        }
-        this.commandHandlers.set(name, handler);
-        return this;
+/**
+ * Parse a cron expression (v2)
+ * Supports:
+ *  - *
+ *  - */n
+ *  - a,b,c
+ *  - a-b
+ *  - a-b/n
+ *  - Named months (JAN-DEC)
+ *  - Named weekdays (SUN-SAT)
+ */
+parseCron(expr) {
+    if (typeof expr !== "string" || !expr.trim()) {
+        throw new TypeError("Cron expression must be a non-empty string");
     }
 
-    async executeCommand(command, context = {}, options = {}) {
-        const name = command.constructor?.name;
-        const handler = this.commandHandlers.get(name);
-        if (!handler) throw new Error(`No handler for command: ${name}`);
+    const parts = expr.trim().replace(/\s+/g, " ").split(" ");
 
-        await this.runHooks('beforeCommand', command, context);
-
-        const exec = async () =>
-            this.runMiddlewares('command', command, context, () =>
-                handler.execute(command, context)
-            );
-
-        const result = await this.withRetryAndTimeout(exec, options);
-
-        await this.runHooks('afterCommand', result, context);
-        return result;
+    if (parts.length !== 5) {
+        throw new Error(
+            `Invalid cron expression '${expr}'. Expected 5 fields, received ${parts.length}.`
+        );
     }
+
+    const months = {
+        JAN: 1, FEB: 2, MAR: 3, APR: 4,
+        MAY: 5, JUN: 6, JUL: 7, AUG: 8,
+        SEP: 9, OCT: 10, NOV: 11, DEC: 12
+    };
+
+    const weekdays = {
+        SUN: 0, MON: 1, TUE: 2, WED: 3,
+        THU: 4, FRI: 5, SAT: 6
+    };
+
+    const normalize = (value, aliases) =>
+        value.replace(/[A-Za-z]{3}/gi, m => aliases[m.toUpperCase()] ?? m);
+
+    const [min, hour, day, month, weekday] = parts;
+
+    return Object.freeze({
+        expression: expr,
+        minute: this.parseCronField(min, 0, 59),
+        hour: this.parseCronField(hour, 0, 23),
+        day: this.parseCronField(day, 1, 31),
+        month: this.parseCronField(normalize(month, months), 1, 12),
+        weekday: this.parseCronField(normalize(weekday, weekdays), 0, 6)
+    });
+}
 
     /* -------------------- Queries -------------------- */
 
