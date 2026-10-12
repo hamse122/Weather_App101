@@ -115,25 +115,50 @@ class MetricsCollector {
         this._record(metric);
     }
 
-    /* ---------------- TIMER / LATENCY ---------------- */
-    startTimer(name, labels = {}) {
-        const start = performance.now();
-        return () => {
-            const duration = performance.now() - start;
-            this.observe(`${name}_duration_ms`, duration, labels);
-            return duration;
-        };
+/* ---------------- TIMER / LATENCY (v2) ---------------- */
+
+startTimer(name, labels = {}) {
+    if (typeof name !== "string" || !name.trim()) {
+        throw new TypeError("Metric name must be a non-empty string");
     }
 
-    async timeAsync(name, fn, labels = {}) {
-        const end = this.startTimer(name, labels);
-        try {
-            return await fn();
-        } finally {
-            end();
-        }
+    const start =
+        globalThis.performance?.now?.() ?? Date.now();
+
+    let stopped = false;
+
+    return () => {
+        if (stopped) return 0;
+        stopped = true;
+
+        const end =
+            globalThis.performance?.now?.() ?? Date.now();
+
+        const duration = Math.max(0, end - start);
+
+        this.observe(
+            `${name}_duration_ms`,
+            duration,
+            { ...labels }
+        );
+
+        return duration;
+    };
+}
+
+async timeAsync(name, fn, labels = {}) {
+    if (typeof fn !== "function") {
+        throw new TypeError("timeAsync expects a function");
     }
 
+    const end = this.startTimer(name, labels);
+
+    try {
+        return await fn();
+    } finally {
+        end();
+    }
+}
     /* ---------------- RATE & PERCENTILES ---------------- */
     _percentile(arr, p) {
         if (!arr.length) return 0;
