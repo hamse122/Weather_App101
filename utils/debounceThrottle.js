@@ -52,84 +52,193 @@ export class PerformanceMetrics {
 }
 
 /* ============================================================
- * Advanced Debounce
+ * Advanced Debounce (v2)
+ * - Leading and trailing execution
+ * - maxWait support
+ * - AbortSignal support
+ * - Cancel, flush, and pending controls
+ * - Promise-safe return values
+ * - Performance metrics
  * ============================================================
  */
 
-export function debounce(
-  fn,
-  wait = 0,
-  options = {}
-) {
-  const metrics = new PerformanceMetrics();
-
-  let timer = null;
-  let lastArgs;
-  let lastThis;
-
-  const {
-    leading = false,
-    trailing = true,
-    signal
-  } = options;
-
-  const invoke = () => {
-    const start = performance.now();
-
-    const result = fn.apply(
-      lastThis,
-      lastArgs
-    );
-
-    metrics.recordExecution(
-      performance.now() - start
-    );
-
-    lastArgs = lastThis = null;
-
-    return result;
-  };
-
-  const debounced = function (...args) {
-    metrics.recordCall();
-
-    lastArgs = args;
-    lastThis = this;
-
-    const callNow =
-      leading && !timer;
-
-    clearTimeout(timer);
-
-    timer = setTimeout(() => {
-      timer = null;
-
-      if (trailing && lastArgs) {
-        invoke();
-      }
-    }, wait);
-
-    if (callNow) {
-      return invoke();
+export function debounce(fn, wait = 0, options = {}) {
+    if (typeof fn !== "function") {
+        throw new TypeError("Expected a function");
     }
-  };
 
-  debounced.cancel = () => {
-    clearTimeout(timer);
-    timer = null;
+    if (!Number.isFinite(wait) || wait < 0) {
+        throw new RangeError("wait must be a non-negative number");
+    }
 
-    metrics.recordCancellation();
-  };
+    const {
+        leading = false,
+        trailing = true,
+        maxWait,
+        signal
+    } = options;
 
-  debounced.metrics = () =>
-    metrics.snapshot();
+    if (
+        maxWait !== undefined &&
+        (!Number.isFinite(maxWait) || maxWait < 0)
+    ) {
+        throw new RangeError("maxWait must be a non-negative number");
+    }
 
-  signal?.addEventListener(
-    "abort",
-    debounced.cancel
-  );
+    const metrics = new PerformanceMetrics();
 
-  return debounced;
+    let timer = null;
+    let maxTimer = null;
+    let lastArgs;
+    let lastThis;
+    let lastCallTime = 0;
+    let lastInvokeTime = 0;
+    let leadingInvoked = false;
+    let lastResult;
+    let cancelled = false;
+
+    const now = () => globalThis.performance?.now?.() ?? Date.now();
+
+    function clearTimers() {
+        if (timer !== null) clearTimeout(timer);
+        if (maxTimer !== null) clearTimeout(maxTimer);
+
+        timer = null;
+        maxTimer = null;
+    }
+
+    function invoke() {
+        if (!lastArgs) return lastResult;
+
+        const args = lastArgs;
+        const context = lastThis;
+
+        lastArgs = lastThis = undefined;
+        lastInvokeTime = now();
+
+        const start = now();
+
+        try {
+            lastResult = fn.apply(context, args);
+            return lastResult;
+        } finally {
+            metrics.recordExecution(now() - start);
+        }
+    }
+
+    function reset() {
+        clearTimers();
+        lastArgs = lastThis = undefined;
+        leadingInvoked = false;
+    }
+
+    function onWaitEnd() {
+        timer = null;
+
+        if (trailing && lastArgs && !cancelled) {
+            invoke();
+        }
+
+        if (maxTimer !== null) {
+            clearTimeout(maxTimer);
+            maxTimer = null;
+        }
+
+        leadingInvoked = false;
+    }
+
+    function onMaxWait() {
+        maxTimer = null;
+
+        if (lastArgs && !cancelled) {
+            if (timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+
+            invoke();
+            leadingInvoked = true;
+
+            timer = setTimeout(onWaitEnd, wait);
+        }
+    }
+
+    function debounced(...args) {
+        if (signal?.aborted || cancelled) return lastResult;
+
+        metrics.recordCall();
+
+        const time = now();
+        const isFirstCall = timer === null;
+
+        lastArgs = args;
+        lastThis = this;
+        lastCallTime = time;
+
+        if (isFirstCall) {
+            if (leading && !leadingInvoked) {
+                leadingInvoked = true;
+                lastInvokeTime = time;
+                invoke();
+            }
+
+            timer = setTimeout(onWaitEnd, wait);
+
+            if (maxWait !== undefined && maxTimer === null) {
+                maxTimer = setTimeout(onMaxWait, maxWait);
+            }
+        } else {
+            clearTimeout(timer);
+            timer = setTimeout(onWaitEnd, wait);
+        }
+
+        return lastResult;
+    }
+
+    debounced.cancel = () => {
+        clearTimers();
+        lastArgs = lastThis = undefined;
+        leadingInvoked = false;
+        cancelled = false;
+
+        metrics.recordCancellation();
+    };
+
+    debounced.flush = () => {
+        if (timer === null) return lastResult;
+
+        clearTimers();
+
+        if (trailing && lastArgs && !cancelled) {
+            return invoke();
+        }
+
+        lastArgs = lastThis = undefined;
+        leadingInvoked = false;
+
+        return lastResult;
+    };
+
+    debounced.pending = () => timer !== null;
+
+    debounced.metrics = () => metrics.snapshot();
+
+    debounced.lastCallTime = () => lastCallTime;
+    debounced.lastInvokeTime = () => lastInvokeTime;
+
+    if (signal) {
+        if (signal.aborted) {
+            cancelled = true;
+        } else {
+            signal.addEventListener("abort", () => {
+                cancelled = true;
+                clearTimers();
+                lastArgs = lastThis = undefined;
+            }, { once: true });
+        }
+    }
+
+    return debounced;
 }
 
 /* ============================================================
