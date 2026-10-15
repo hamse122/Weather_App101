@@ -46,37 +46,137 @@ export class BackupSystem {
     this.cleanupExpired();
   }
 
-  /* =======================================================
-   * Events
-   * ======================================================= */
+/* =======================================================
+ * Events (Advanced v2)
+ * - Handler validation
+ * - Once listeners
+ * - Safe iteration during mutations
+ * - Async event support
+ * - Listener cleanup
+ * - Error isolation
+ * ======================================================= */
 
-  on(event, handler) {
-    if (!this.events.has(event)) {
-      this.events.set(event, new Set());
+on(event, handler, { once = false, priority = 0, signal } = {}) {
+    if (typeof handler !== "function") {
+        throw new TypeError("Event handler must be a function");
     }
 
-    this.events.get(event).add(handler);
+    if (signal?.aborted) {
+        return () => {};
+    }
 
-    return () => this.off(event, handler);
-  }
+    if (!this.events.has(event)) {
+        this.events.set(event, new Map());
+    }
 
-  off(event, handler) {
-    this.events.get(event)?.delete(handler);
-  }
-
-  emit(event, payload) {
     const handlers = this.events.get(event);
 
-    if (!handlers) return;
-
-    for (const handler of handlers) {
-      try {
-        handler(payload);
-      } catch (err) {
-        console.error(err);
-      }
+    if (handlers.has(handler)) {
+        return () => this.off(event, handler);
     }
-  }
+
+    const entry = { handler, once, priority: Number(priority) || 0 };
+
+    handlers.set(handler, entry);
+
+    const unsubscribe = () => this.off(event, handler);
+
+    signal?.addEventListener("abort", unsubscribe, { once: true });
+
+    return () => {
+        signal?.removeEventListener("abort", unsubscribe);
+        unsubscribe();
+    };
+}
+
+once(event, handler, options = {}) {
+    return this.on(event, handler, { ...options, once: true });
+}
+
+off(event, handler) {
+    const handlers = this.events.get(event);
+    if (!handlers) return false;
+
+    const removed = handlers.delete(handler);
+
+    if (handlers.size === 0) {
+        this.events.delete(event);
+    }
+
+    return removed;
+}
+
+emit(event, payload) {
+    const handlers = this.events.get(event);
+    if (!handlers?.size) return false;
+
+    const snapshot = [...handlers.values()]
+        .sort((a, b) => b.priority - a.priority);
+
+    for (const entry of snapshot) {
+        // A listener may have been removed during dispatch.
+        if (handlers.get(entry.handler) !== entry) continue;
+
+        if (entry.once) {
+            this.off(event, entry.handler);
+        }
+
+        try {
+            const result = entry.handler(payload);
+
+            if (result && typeof result.then === "function") {
+                result.catch(err => {
+                    console.error(`[Events] Async handler failed for "${String(event)}":`, err);
+                });
+            }
+        } catch (err) {
+            console.error(`[Events] Handler failed for "${String(event)}":`, err);
+        }
+    }
+
+    return true;
+}
+
+async emitAsync(event, payload) {
+    const handlers = this.events.get(event);
+    if (!handlers?.size) return [];
+
+    const snapshot = [...handlers.values()]
+        .sort((a, b) => b.priority - a.priority);
+
+    const results = [];
+
+    for (const entry of snapshot) {
+        if (handlers.get(entry.handler) !== entry) continue;
+
+        if (entry.once) {
+            this.off(event, entry.handler);
+        }
+
+        try {
+            results.push(await entry.handler(payload));
+        } catch (err) {
+            console.error(`[Events] Handler failed for "${String(event)}":`, err);
+            results.push(undefined);
+        }
+    }
+
+    return results;
+}
+
+listenerCount(event) {
+    return this.events.get(event)?.size ?? 0;
+}
+
+removeAllListeners(event) {
+    if (event !== undefined) {
+        this.events.delete(event);
+    } else {
+        this.events.clear();
+    }
+
+    return this;
+}
 
   /* =======================================================
    * Backup Creation
