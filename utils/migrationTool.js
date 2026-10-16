@@ -1,11 +1,20 @@
 const crypto = require("crypto");
 
+const SAFE_IDENTIFIER = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+function validateIdentifier(name, field) {
+    if (!SAFE_IDENTIFIER.test(name)) {
+        throw new Error(`Invalid table name for ${field}: ${name}`);
+    }
+    return name;
+}
+
 class MigrationTool {
     constructor(databaseManager, options = {}) {
         this.databaseManager = databaseManager;
         this.migrations = [];
-        this.tableName = options.tableName || "_migrations";
-        this.lockTable = options.lockTable || "_migration_lock";
+        this.tableName = validateIdentifier(options.tableName || "_migrations", "tableName");
+        this.lockTable = validateIdentifier(options.lockTable || "_migration_lock", "lockTable");
     }
 
     register(migration) {
