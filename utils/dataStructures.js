@@ -201,31 +201,53 @@ class Stack {
         return this;
     }
 
-    /* ---------------- Queries ---------------- */
+/* ---------------- Queries (v2) ---------------- */
 
-    isEmpty() {
-        return this.items.length === 0;
-    }
+isEmpty() {
+    return this.items.length === 0;
+}
 
-    isFull() {
-        return this.size() >= this.maxSize;
-    }
+isFull() {
+    return Number.isFinite(this.maxSize) &&
+        this.items.length >= this.maxSize;
+}
 
-    size() {
-        return this.items.length;
-    }
+size() {
+    return this.items.length;
+}
 
-    capacity() {
-        return this.maxSize;
-    }
+capacity() {
+    return this.maxSize;
+}
 
-    contains(value) {
-        return this.items.includes(value);
-    }
+remainingCapacity() {
+    return Number.isFinite(this.maxSize)
+        ? Math.max(0, this.maxSize - this.items.length)
+        : Infinity;
+}
 
-    indexOf(value) {
-        return this.items.lastIndexOf(value);
-    }
+contains(value) {
+    return this.items.includes(value);
+}
+
+indexOf(value) {
+    return this.items.indexOf(value);
+}
+
+lastIndexOf(value) {
+    return this.items.lastIndexOf(value);
+}
+
+toArray() {
+    return [...this.items];
+}
+
+count(value) {
+    return this.items.reduce(
+        (total, item) => total + Number(Object.is(item, value)),
+        0
+    );
+}
 
     /* ---------------- Utilities ---------------- */
 
