@@ -76,26 +76,46 @@ export class MigrationManager {
         return true;
     }
 
-    /* =========================
-       VERSION
-    ========================== */
+/* =========================
+   VERSION (v2)
+========================== */
 
-    getVersion() {
-        return this.version;
+getVersion() {
+    return this.version;
+}
+
+setVersion(version) {
+    if (this.running) {
+        throw new Error(
+            "Cannot change version while migration is running"
+        );
     }
 
-    setVersion(version) {
-        if (this.running) {
-            throw new Error(
-                "Cannot change version while migration is running"
-            );
-        }
+    this.#ensureUnlocked();
 
-        this.#ensureUnlocked();
+    const validatedVersion = this.#validateVersion(version);
 
-        this.version = this.#validateVersion(version);
+    if (validatedVersion === this.version) {
         return this;
     }
+
+    const previousVersion = this.version;
+
+    this.version = validatedVersion;
+
+    try {
+        this.emit?.("versionChanged", {
+            previousVersion,
+            currentVersion: validatedVersion,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        this.version = previousVersion;
+        throw error;
+    }
+
+    return this;
+}
 
     /* =========================
        MIGRATION
