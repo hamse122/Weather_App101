@@ -1,251 +1,348 @@
 /**
- * String Helper Functions (Upgraded Production Version)
+ * String Helper Functions (2026 Edition)
  * Features:
- * - Strong input validation
- * - Better Unicode-safe handling
- * - Safer truncation
- * - Configurable random string generation
- * - Extra useful helpers
+ * - Unicode-aware string manipulation
+ * - Cryptographically secure random strings
+ * - Locale-aware casing
+ * - Safe truncation and repetition
+ * - Slug generation
+ * - HTML escaping
+ * - Word and character counting
+ * - Input validation
  */
 
+const isString = value =>
+    typeof value === "string" || value instanceof String;
+
+const toSafeString = value =>
+    isString(value) ? String(value) : "";
+
+const toCharacters = str =>
+    [...new Intl.Segmenter(undefined, {
+        granularity: "grapheme"
+    }).segment(str)].map(item => item.segment);
+
 /**
- * Check whether a value is a string
- * @param {unknown} value
- * @returns {boolean}
+ * Capitalize the first character.
  */
-function isString(value) {
-  return typeof value === 'string' || value instanceof String;
+export function capitalize(str = "", locale) {
+    const input = toSafeString(str).trim();
+    if (!input) return "";
+
+    const chars = toCharacters(input);
+    const first = chars.shift();
+
+    return (
+        (locale
+            ? first.toLocaleUpperCase(locale)
+            : first.toLocaleUpperCase()) +
+        chars.join("")
+    );
 }
 
 /**
- * Normalize string input
- * @param {unknown} value
- * @returns {string}
+ * Convert to camelCase.
  */
-function toSafeString(value) {
-  return isString(value) ? String(value) : '';
+export function toCamelCase(str = "", locale) {
+    const input = toSafeString(str).trim();
+    if (!input) return "";
+
+    const words = input
+        .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+        .match(/[\p{L}\p{N}]+/gu) || [];
+
+    return words
+        .map((word, index) => {
+            const lower = locale
+                ? word.toLocaleLowerCase(locale)
+                : word.toLocaleLowerCase();
+
+            return index === 0
+                ? lower
+                : capitalize(lower, locale);
+        })
+        .join("");
 }
 
 /**
- * Capitalize the first character and lowercase the rest
- * @param {string} str
- * @returns {string}
+ * Convert to kebab-case.
  */
-export function capitalize(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return '';
-
-  const [first, ...rest] = [...input];
-  return first.toLocaleUpperCase() + rest.join('').toLocaleLowerCase();
+export function toKebabCase(str = "") {
+    return toSafeString(str)
+        .normalize("NFKC")
+        .replace(/([a-z\d])([A-Z])/g, "$1-$2")
+        .replace(/([A-Z])([A-Z][a-z])/g, "$1-$2")
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/g, "")
+        .toLowerCase();
 }
 
 /**
- * Convert a string to camelCase
- * Handles spaces, underscores, hyphens, and mixed casing
- * @param {string} str
- * @returns {string}
+ * Convert to snake_case.
  */
-export function toCamelCase(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return '';
-
-  return input
-    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
-    .replace(/[_-\s]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .map((word, index) => {
-      const lower = word.toLocaleLowerCase();
-      if (index === 0) return lower;
-      return lower.charAt(0).toLocaleUpperCase() + lower.slice(1);
-    })
-    .join('');
+export function toSnakeCase(str = "") {
+    return toKebabCase(str).replace(/-/g, "_");
 }
 
 /**
- * Convert a string to kebab-case
- * Handles camelCase, spaces, underscores, and repeated separators
- * @param {string} str
- * @returns {string}
+ * Convert to Title Case.
  */
-export function toKebabCase(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return '';
+export function toTitleCase(str = "", locale) {
+    const input = toSafeString(str).trim();
+    if (!input) return "";
 
-  return input
-    .replace(/([a-z\d])([A-Z])/g, '$1-$2')
-    .replace(/[_\s]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .toLocaleLowerCase();
+    return input.replace(/\S+/gu, word => {
+        const chars = toCharacters(
+            locale ? word.toLocaleLowerCase(locale) : word.toLowerCase()
+        );
+
+        if (!chars.length) return word;
+
+        return capitalize(chars.join(""), locale);
+    });
 }
 
 /**
- * Convert a string to snake_case
- * @param {string} str
- * @returns {string}
- */
-export function toSnakeCase(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return '';
-
-  return input
-    .replace(/([a-z\d])([A-Z])/g, '$1_$2')
-    .replace(/[-\s]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '')
-    .toLocaleLowerCase();
-}
-
-/**
- * Convert a string to Title Case
- * @param {string} str
- * @returns {string}
- */
-export function toTitleCase(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return '';
-
-  return input
-    .toLocaleLowerCase()
-    .split(/\s+/)
-    .map(word => word.charAt(0).toLocaleUpperCase() + word.slice(1))
-    .join(' ');
-}
-
-/**
- * Truncate a string to a specified length
- * Supports word boundary preservation
- * @param {string} str
- * @param {number} maxLength
- * @param {Object} options
- * @param {string} [options.suffix='...']
- * @param {boolean} [options.wordBoundary=false]
- * @returns {string}
+ * Truncate by Unicode grapheme clusters.
  */
 export function truncate(
-  str = '',
-  maxLength = 0,
-  { suffix = '...', wordBoundary = false } = {}
+    str = "",
+    maxLength = 0,
+    { suffix = "...", wordBoundary = false } = {}
 ) {
-  const input = toSafeString(str);
-  const safeSuffix = toSafeString(suffix);
+    const input = toSafeString(str);
+    const ending = toSafeString(suffix);
 
-  if (!input || !Number.isInteger(maxLength) || maxLength <= 0) return '';
-  if ([...input].length <= maxLength) return input;
-
-  const chars = [...input];
-  const allowedLength = Math.max(0, maxLength - [...safeSuffix].length);
-
-  let truncated = chars.slice(0, allowedLength).join('');
-
-  if (wordBoundary) {
-    const lastSpace = truncated.lastIndexOf(' ');
-    if (lastSpace > 0) {
-      truncated = truncated.slice(0, lastSpace);
+    if (!Number.isInteger(maxLength) || maxLength <= 0) {
+        return "";
     }
-  }
 
-  return truncated + safeSuffix;
+    const chars = toCharacters(input);
+
+    if (chars.length <= maxLength) return input;
+
+    const suffixChars = toCharacters(ending);
+
+    if (suffixChars.length >= maxLength) {
+        return suffixChars.slice(0, maxLength).join("");
+    }
+
+    const available = maxLength - suffixChars.length;
+    let result = chars.slice(0, available).join("");
+
+    if (wordBoundary) {
+        const lastSpace = result.lastIndexOf(" ");
+
+        if (lastSpace > 0) {
+            result = result.slice(0, lastSpace);
+        }
+    }
+
+    return result + ending;
 }
 
 /**
- * Remove all whitespace from a string
- * @param {string} str
- * @returns {string}
+ * Remove whitespace.
  */
-export function removeWhitespace(str = '') {
-  return toSafeString(str).replace(/\s+/g, '');
+export function removeWhitespace(str = "") {
+    return toSafeString(str).replace(/\s+/gu, "");
 }
 
 /**
- * Reverse a string safely for Unicode characters
- * @param {string} str
- * @returns {string}
+ * Reverse by Unicode grapheme clusters.
  */
-export function reverseString(str = '') {
-  return [...toSafeString(str)].reverse().join('');
+export function reverseString(str = "") {
+    return toCharacters(toSafeString(str)).reverse().join("");
 }
 
 /**
- * Check if a string is a palindrome
- * Ignores punctuation, underscores, spaces, and case
- * @param {string} str
- * @returns {boolean}
+ * Check whether a string is a palindrome.
  */
-export function isPalindrome(str = '') {
-  const input = toSafeString(str);
-  if (!input) return false;
+export function isPalindrome(str = "", locale) {
+    const input = toSafeString(str);
 
-  const cleaned = input.replace(/[^\p{L}\p{N}]+/gu, '').toLocaleLowerCase();
-  return cleaned === [...cleaned].reverse().join('');
+    const cleaned = input
+        .normalize("NFKC")
+        .replace(/[^\p{L}\p{N}]/gu, "");
+
+    const normalized = locale
+        ? cleaned.toLocaleLowerCase(locale)
+        : cleaned.toLowerCase();
+
+    if (!normalized) return false;
+
+    return normalized === reverseString(normalized);
 }
 
 /**
- * Generate a random string
- * @param {number} length
- * @param {Object} options
- * @param {boolean} [options.uppercase=true]
- * @param {boolean} [options.lowercase=true]
- * @param {boolean} [options.numbers=true]
- * @param {boolean} [options.symbols=false]
- * @returns {string}
+ * Generate a cryptographically secure random string.
+ * Uses Web Crypto in browsers and Node.js environments
+ * that expose globalThis.crypto.
  */
 export function randomString(
-  length = 8,
-  {
-    uppercase = true,
-    lowercase = true,
-    numbers = true,
-    symbols = false,
-  } = {}
+    length = 8,
+    {
+        uppercase = true,
+        lowercase = true,
+        numbers = true,
+        symbols = false
+    } = {}
 ) {
-  if (!Number.isInteger(length) || length <= 0) return '';
+    if (!Number.isSafeInteger(length) || length < 0) {
+        throw new RangeError("Length must be a non-negative safe integer.");
+    }
 
-  let chars = '';
-  if (uppercase) chars += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  if (lowercase) chars += 'abcdefghijklmnopqrstuvwxyz';
-  if (numbers) chars += '0123456789';
-  if (symbols) chars += '!@#$%^&*()_+-=[]{}|;:,.<>?';
+    if (length === 0) return "";
 
-  if (!chars) {
-    throw new Error('At least one character set must be enabled.');
-  }
+    let chars = "";
 
-  return Array.from({ length }, () => {
-    const index = Math.floor(Math.random() * chars.length);
-    return chars.charAt(index);
-  }).join('');
+    if (uppercase) chars += "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (lowercase) chars += "abcdefghijklmnopqrstuvwxyz";
+    if (numbers) chars += "0123456789";
+    if (symbols) chars += "!@#$%^&*()-_=+[]{}:,.?";
+
+    if (!chars.length) {
+        throw new Error("At least one character set must be enabled.");
+    }
+
+    const crypto = globalThis.crypto;
+
+    if (!crypto?.getRandomValues) {
+        throw new Error("A cryptographically secure random source is unavailable.");
+    }
+
+    let result = "";
+
+    // Rejection sampling avoids modulo bias.
+    const limit = 256 - (256 % chars.length);
+    const buffer = new Uint8Array(Math.min(4096, Math.max(32, length * 2)));
+
+    while (result.length < length) {
+        crypto.getRandomValues(buffer);
+
+        for (const byte of buffer) {
+            if (byte >= limit) continue;
+
+            result += chars[byte % chars.length];
+
+            if (result.length === length) break;
+        }
+    }
+
+    return result;
 }
 
 /**
- * Count words in a string
- * @param {string} str
- * @returns {number}
+ * Count words using Unicode-aware matching.
  */
-export function wordCount(str = '') {
-  const input = toSafeString(str).trim();
-  if (!input) return 0;
-  return input.split(/\s+/).length;
+export function wordCount(str = "", locale) {
+    const input = toSafeString(str).trim();
+    if (!input) return 0;
+
+    if (typeof Intl.Segmenter === "function") {
+        const segmenter = new Intl.Segmenter(locale, {
+            granularity: "word"
+        });
+
+        let count = 0;
+
+        for (const part of segmenter.segment(input)) {
+            if (part.isWordLike) count++;
+        }
+
+        return count;
+    }
+
+    return input.split(/\s+/u).length;
 }
 
 /**
- * Check if a string is empty or only whitespace
- * @param {string} str
- * @returns {boolean}
+ * Count grapheme clusters.
  */
-export function isBlank(str = '') {
-  return toSafeString(str).trim().length === 0;
+export function characterCount(str = "") {
+    return toCharacters(toSafeString(str)).length;
 }
 
 /**
- * Repeat a string safely
- * @param {string} str
- * @param {number} count
- * @returns {string}
+ * Check for blank input.
  */
-export function repeatString(str = '', count = 1) {
-  const input = toSafeString(str);
-  if (!Number.isInteger(count) || count <= 0) return '';
-  return input.repeat(count);
+export function isBlank(str = "") {
+    return toSafeString(str).trim().length === 0;
+}
+
+/**
+ * Repeat safely with a configurable output limit.
+ */
+export function repeatString(str = "", count = 1, maxLength = 1_000_000) {
+    const input = toSafeString(str);
+
+    if (!Number.isSafeInteger(count) || count < 0) {
+        throw new RangeError("Count must be a non-negative safe integer.");
+    }
+
+    if (!Number.isSafeInteger(maxLength) || maxLength < 0) {
+        throw new RangeError("maxLength must be a non-negative safe integer.");
+    }
+
+    if (input.length * count > maxLength) {
+        throw new RangeError("Repeated string exceeds the maximum output length.");
+    }
+
+    return input.repeat(count);
+}
+
+/**
+ * Convert text into a URL-friendly slug.
+ */
+export function slugify(str = "") {
+    return toSafeString(str)
+        .normalize("NFKD")
+        .replace(/\p{M}/gu, "")
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Escape HTML-sensitive characters.
+ */
+export function escapeHTML(str = "") {
+    return toSafeString(str).replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    })[char]);
+}
+
+/**
+ * Check whether a string contains only letters and numbers.
+ */
+export function isAlphanumeric(str = "") {
+    const input = toSafeString(str);
+
+    return input.length > 0 && /^[\p{L}\p{N}]+$/u.test(input);
+}
+
+/**
+ * Remove duplicate characters while preserving order.
+ */
+export function uniqueCharacters(str = "") {
+    return [...new Set(toCharacters(toSafeString(str)))].join("");
+}
+
+/**
+ * Compare strings using normalized Unicode.
+ */
+export function equalsIgnoreCase(a, b, locale) {
+    const normalize = value => {
+        const str = toSafeString(value).normalize("NFC");
+
+        return locale
+            ? str.toLocaleLowerCase(locale)
+            : str.toLowerCase();
+    };
+
+    return normalize(a) === normalize(b);
 }
