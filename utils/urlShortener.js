@@ -190,103 +190,192 @@ normalizeCode(code) {
 
     return code;
 }
-    /* -------------------------
-       CORE FEATURES
-    ------------------------- */
+  /* -------------------------
+   CORE FEATURES (v2)
+------------------------- */
 
-    shorten(longUrl, options = {}) {
-        this.checkRateLimit(options.rateKey);
+shorten(longUrl, options = {}) {
+    this.checkRateLimit(options.rateKey);
 
-        const {
-            customCode = null,
-            expiresIn = null,
-            metadata = {},
-            tags = []
-        } = options;
+    const {
+        customCode = null,
+        expiresIn = null,
+        metadata = {},
+        tags = []
+    } = options;
 
-        const normalizedUrl = this.validateUrl(longUrl);
+    const normalizedUrl = this.validateUrl(longUrl);
 
-        // Deduplicate existing URLs (unless custom code requested)
-        if (!customCode && this.urlIndex.has(normalizedUrl)) {
-            const existingCode = this.urlIndex.get(normalizedUrl);
-            return this.urls.get(existingCode).shortUrl;
-        }
-
-        // Validate custom code
-        let code;
-        if (customCode) {
-            code = this.normalizeCode(customCode);
-            if (this.urls.has(code)) {
-                throw new Error("Custom code already exists");
-            }
-        } else {
-            // Generate unique code with fallback hashing
-            code = this.generateCode();
-            let attempts = 0;
-
-            while (this.urls.has(code)) {
-                code = attempts > 3
-                    ? this.generateHashCode(normalizedUrl + Date.now())
-                    : this.generateCode();
-                attempts++;
-            }
-        }
-
-        this.ensureCapacity();
-
-        const shortUrl = this.baseUrl + code;
-
-        const urlData = {
-            code,
-            longUrl: normalizedUrl,
-            shortUrl,
-            createdAt: new Date(),
-            clicks: 0,
-            uniqueVisitors: new Set(),
-            analytics: {}, // date -> clicks
-            referrers: {}, // referrer -> count
-            metadata,
-            tags,
-            expiresAt: expiresIn ? new Date(Date.now() + expiresIn) : null
-        };
-
-        this.urls.set(code, urlData);
-        this.urlIndex.set(normalizedUrl, code);
-
-        return shortUrl;
+    if (
+        expiresIn !== null &&
+        (!Number.isFinite(expiresIn) || expiresIn <= 0)
+    ) {
+        throw new TypeError("expiresIn must be a positive number of milliseconds");
     }
 
-    expand(shortUrl, options = {}) {
-        const code = shortUrl.replace(this.baseUrl, "").trim();
-        const data = this.urls.get(code);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        throw new TypeError("metadata must be an object");
+    }
 
-        if (!data) {
-            throw new Error("Short URL not found");
+    if (!Array.isArray(tags)) {
+        throw new TypeError("tags must be an array");
+    }
+
+    // Remove expired duplicate before reuse
+    if (!customCode && this.urlIndex.has(normalizedUrl)) {
+        const existingCode = this.urlIndex.get(normalizedUrl);
+        const existing = this.urls.get(existingCode);
+
+        if (
+            existing &&
+            (!existing.expiresAt || existing.expiresAt.getTime() > Date.now())
+        ) {
+            return existing.shortUrl;
         }
 
-        if (data.expiresAt && new Date() > data.expiresAt) {
-            this.delete(code);
-            throw new Error("Short URL has expired");
+        if (existing) this.delete(existingCode);
+    }
+
+    // Generate or validate code
+    let code;
+
+    if (customCode !== null) {
+        code = this.normalizeCode(customCode);
+
+        const existing = this.urls.get(code);
+
+        if (
+            existing &&
+            (!existing.expiresAt || existing.expiresAt.getTime() > Date.now())
+        ) {
+            throw new Error("Custom code already exists");
         }
 
-        // Analytics update
+        if (existing) this.delete(code);
+    } else {
+        let attempts = 0;
+
+        do {
+            code = attempts < 5
+                ? this.generateCode()
+                : this.generateHashCode(
+                    `${normalizedUrl}:${Date.now()}:${crypto.randomUUID()}`
+                );
+
+            attempts++;
+
+            if (attempts > 20 && this.urls.has(code)) {
+                throw new Error("Unable to generate a unique short code");
+            }
+        } while (this.urls.has(code));
+    }
+
+    this.ensureCapacity();
+
+    const shortUrl = new URL(code, this.baseUrl.endsWith("/")
+        ? this.baseUrl
+        : `${this.baseUrl}/`).toString();
+
+    const urlData = {
+        code,
+        longUrl: normalizedUrl,
+        shortUrl,
+        createdAt: new Date(),
+        clicks: 0,
+        uniqueVisitors: new Set(),
+        analytics: Object.create(null),
+        referrers: Object.create(null),
+        metadata: structuredClone(metadata),
+        tags: [...new Set(tags.filter(tag => typeof tag === "string"))],
+        expiresAt: expiresIn !== null
+            ? new Date(Date.now() + expiresIn)
+            : null
+    };
+
+    this.urls.set(code, urlData);
+    this.urlIndex.set(normalizedUrl, code);
+
+    return shortUrl;
+}
+
+expand(shortUrl, options = {}) {
+    let code;
+
+    try {
+        const input = new URL(shortUrl);
+        const base = new URL(
+            this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`
+        );
+
+        if (input.origin !== base.origin) {
+            throw new Error("Short URL origin mismatch");
+        }
+
+        const basePath = base.pathname.endsWith("/")
+            ? base.pathname
+            : `${base.pathname}/`;
+
+        if (!input.pathname.startsWith(basePath)) {
+            throw new Error("Short URL path mismatch");
+        }
+
+        code = decodeURIComponent(input.pathname.slice(basePath.length));
+
+        if (!code || code.includes("/")) {
+            throw new Error("Invalid short URL");
+        }
+    } catch {
+        // Allow a bare code as input, but not an arbitrary external URL
+        if (
+            typeof shortUrl === "string" &&
+            /^[A-Za-z0-9_-]+$/.test(shortUrl.trim())
+        ) {
+            code = shortUrl.trim();
+        } else {
+            throw new Error("Invalid short URL format");
+        }
+    }
+
+    const data = this.urls.get(this.normalizeCode(code));
+
+    if (!data) {
+        throw new Error("Short URL not found");
+    }
+
+    if (data.expiresAt && Date.now() >= data.expiresAt.getTime()) {
+        this.delete(code);
+        throw new Error("Short URL has expired");
+    }
+
+    // Update analytics only when tracking is enabled
+    if (options.track !== false) {
         data.clicks++;
 
-        const dateKey = new Date().toISOString().split("T")[0];
+        const now = new Date();
+        const dateKey = now.toISOString().slice(0, 10);
+
         data.analytics[dateKey] = (data.analytics[dateKey] || 0) + 1;
 
-        if (options.visitorId) {
-            data.uniqueVisitors.add(options.visitorId);
+        if (
+            typeof options.visitorId === "string" &&
+            options.visitorId.trim()
+        ) {
+            data.uniqueVisitors.add(options.visitorId.trim());
         }
 
-        if (options.referrer) {
-            data.referrers[options.referrer] =
-                (data.referrers[options.referrer] || 0) + 1;
-        }
+        if (
+            typeof options.referrer === "string" &&
+            options.referrer.trim()
+        ) {
+            const referrer = options.referrer.trim().slice(0, 2048);
 
-        return data.longUrl;
+            data.referrers[referrer] =
+                (data.referrers[referrer] || 0) + 1;
+        }
     }
 
+    return data.longUrl;
+}
    /* -------------------------
    ANALYTICS & MANAGEMENT
 ------------------------- */
