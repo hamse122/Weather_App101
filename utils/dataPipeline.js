@@ -63,33 +63,112 @@ class DataPipeline {
     }
 
 /* =========================
-   HOOK SYSTEM
+   HOOK SYSTEM (v2)
 ========================= */
 
-hook(type, fn) {
+hook(type, fn, options = {}) {
+    if (typeof type !== "string" || !type.trim()) {
+        throw new TypeError("Hook type must be a non-empty string");
+    }
+
     if (typeof fn !== "function") {
         throw new TypeError(`Hook for "${type}" must be a function`);
     }
+
+    const {
+        priority = 0,
+        once = false,
+        enabled = true
+    } = options;
 
     if (!this.hooks[type]) {
         this.hooks[type] = [];
     }
 
-    this.hooks[type].push(fn);
+    // Prevent duplicate registrations
+    if (this.hooks[type].some(h => h.fn === fn)) {
+        return this;
+    }
+
+    const entry = {
+        fn,
+        priority: Number.isFinite(priority) ? priority : 0,
+        once: Boolean(once),
+        enabled: Boolean(enabled)
+    };
+
+    // Higher priority hooks run first
+    const index = this.hooks[type].findIndex(
+        hook => hook.priority < entry.priority
+    );
+
+    if (index === -1) {
+        this.hooks[type].push(entry);
+    } else {
+        this.hooks[type].splice(index, 0, entry);
+    }
 
     return this;
 }
 
-async runHooks(type, payload) {
-    const hooks = this.hooks[type] || [];
+async runHooks(type, payload, options = {}) {
+    const {
+        stopOnError = false,
+        parallel = false
+    } = options;
 
-    for (const fn of [...hooks]) {
+    const hooks = [...(this.hooks[type] || [])]
+        .filter(hook => hook.enabled !== false);
+
+    const errors = [];
+
+    const execute = async hook => {
+        // Support both new hook entries and legacy function entries
+        const fn = typeof hook === "function" ? hook : hook.fn;
+
+        if (typeof fn !== "function") return;
+
         try {
             await fn(payload, this.context);
         } catch (error) {
+            errors.push({ error, hook: fn });
+
+            if (stopOnError) {
+                throw error;
+            }
+
             console.error(`[Hook:${type}]`, error);
+        } finally {
+            if (typeof hook !== "function" && hook.once) {
+                const registered = this.hooks[type];
+                const index = registered?.indexOf(hook);
+
+                if (index !== -1 && index != null) {
+                    registered.splice(index, 1);
+                }
+            }
+        }
+    };
+
+    if (parallel) {
+        const results = await Promise.allSettled(
+            hooks.map(execute)
+        );
+
+        if (stopOnError) {
+            const failed = results.find(
+                result => result.status === "rejected"
+            );
+
+            if (failed) throw failed.reason;
+        }
+    } else {
+        for (const hook of hooks) {
+            await execute(hook);
         }
     }
+
+    this.lastHookErrors = errors;
 
     return this;
 }
