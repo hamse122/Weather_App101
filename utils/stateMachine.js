@@ -102,29 +102,70 @@ defineState(state, config = {}) {
         return true;
     }
 
-    /* ---------------- TRANSITIONS ---------------- */
-    addTransition(fromState, toState, options = {}) {
-        const key = `${fromState}->${toState}`;
-        this.transitions.set(key, {
-            fromState,
-            toState,
-            guard: options.guard || (async () => true),
-            priority: options.priority || 0,
-            action: options.action || null
-        });
-        return this;
+/* ---------------- TRANSITIONS (v2) ---------------- */
+
+addTransition(fromState, toState, options = {}) {
+    if (typeof fromState !== "string" || !fromState.trim()) {
+        throw new TypeError("fromState must be a non-empty string");
     }
 
-    _getTransition(toState) {
-        return this.transitions.get(`${this.state}->${toState}`);
+    if (typeof toState !== "string" || !toState.trim()) {
+        throw new TypeError("toState must be a non-empty string");
     }
 
-    async canTransition(toState, payload) {
-        const transition = this._getTransition(toState);
-        if (!transition) return false;
-        return await transition.guard(payload, this.state);
+    const {
+        guard = async () => true,
+        priority = 0,
+        action = null,
+        metadata = {}
+    } = options;
+
+    if (typeof guard !== "function") {
+        throw new TypeError("Transition guard must be a function");
     }
 
+    if (action !== null && typeof action !== "function") {
+        throw new TypeError("Transition action must be a function or null");
+    }
+
+    const key = `${fromState}->${toState}`;
+
+    this.transitions.set(key, {
+        fromState,
+        toState,
+        guard,
+        priority: Number.isFinite(priority) ? priority : 0,
+        action,
+        metadata: { ...metadata },
+        createdAt: Date.now()
+    });
+
+    return this;
+}
+
+_getTransition(toState) {
+    return this.transitions.get(`${this.state}->${toState}`) ?? null;
+}
+
+async canTransition(toState, payload = {}) {
+    const transition = this._getTransition(toState);
+
+    if (!transition) return false;
+
+    try {
+        return (await transition.guard(payload, this.state, toState)) === true;
+    } catch (error) {
+        if (typeof this.onTransitionError === "function") {
+            await this.onTransitionError(error, {
+                fromState: this.state,
+                toState,
+                payload
+            });
+        }
+
+        return false;
+    }
+}
     /* ---------------- CORE TRANSITION ---------------- */
     async transitionTo(newState, payload = null) {
         const transition = this._getTransition(newState);
