@@ -1,106 +1,11 @@
-/**
- * MarkdownParser v2
- * - Safe
- * - Reversible
- * - Deterministic
- * - Regex-minimized
- */
-
-export class MarkdownParser {
-
-    // ==========================
-    // MARKDOWN → HTML
-    // ==========================
-    static parse(markdown = "") {
-        const tokens = this.#tokenize(markdown);
-        return this.#renderHTML(tokens);
-    }
-
-    // ==========================
-    // HTML → MARKDOWN
-    // ==========================
-    static toMarkdown(html = "") {
-        let md = html;
-
-        md = md.replace(/<pre><code class="lang-(.*?)">([\s\S]*?)<\/code><\/pre>/g,
-            (_, l, c) => `\`\`\`${l}\n${this.#unescape(c)}\n\`\`\``);
-
-        md = md.replace(/<code>(.*?)<\/code>/g, "`$1`");
-
-        md = md.replace(/<h([1-6])>(.*?)<\/h\1>/g,
-            (_, l, t) => `${"#".repeat(+l)} ${t}\n\n`);
-
-        md = md.replace(/<strong><em>(.*?)<\/em><\/strong>/g, "***$1***");
-        md = md.replace(/<strong>(.*?)<\/strong>/g, "**$1**");
-        md = md.replace(/<em>(.*?)<\/em>/g, "*$1*");
-        md = md.replace(/<del>(.*?)<\/del>/g, "~~$1~~");
-
-        md = md.replace(/<a href="([^"]+)">(.*?)<\/a>/g, "[$2]($1)");
-        md = md.replace(/<img src="([^"]+)" alt="([^"]*)" ?\/?>/g, "![$2]($1)");
-
-        md = md.replace(/<blockquote>([\s\S]*?)<\/blockquote>/g,
-            (_, t) => t.split('\n').map(l => `> ${l}`).join('\n'));
-
-        md = md.replace(/<li>(.*?)<\/li>/g, "* $1\n");
-        md = md.replace(/<\/?(ul|ol)>/g, "");
-
-        md = md.replace(/<hr\s*\/?>/g, "\n---\n");
-        md = md.replace(/<p>(.*?)<\/p>/g, "$1\n\n");
-
-        return md.replace(/\n{3,}/g, "\n\n").trim();
-    }
-
-    // ==========================
-    // TOKENIZER
-    // ==========================
-    static #tokenize(input) {
-        const lines = input.split('\n');
-        const tokens = [];
-        let inCode = false;
-        let buffer = [];
-
-        for (let line of lines) {
-            if (line.startsWith("```")) {
-                if (inCode) {
-                    tokens.push({ type: "code", content: buffer.join('\n') });
-                    buffer = [];
-                }
-                inCode = !inCode;
-                continue;
-            }
-
-            if (inCode) {
-                buffer.push(line);
-                continue;
-            }
-
-            if (/^#{1,6}\s/.test(line))
-                tokens.push({ type: "heading", level: line.match(/^#+/)[0].length, text: line.replace(/^#+\s/, "") });
-
-            else if (/^>\s?/.test(line))
-                tokens.push({ type: "quote", text: line.replace(/^>\s?/, "") });
-
-            else if (/^(\*|-)\s/.test(line))
-                tokens.push({ type: "ul", text: line.replace(/^(\*|-)\s/, "") });
-
-            else if (/^\d+\.\s/.test(line))
-                tokens.push({ type: "ol", text: line.replace(/^\d+\.\s/, "") });
-
-            else if (/^---$/.test(line))
-                tokens.push({ type: "hr" });
-
-            else if (line.trim())
-                tokens.push({ type: "paragraph", text: line });
-
-        }
-
-        return tokens;
-    }
-
 // ==========================
-// RENDER HTML (v3)
+// RENDER HTML (v4)
 // ==========================
 static #renderHTML(tokens) {
+    if (!Array.isArray(tokens)) {
+        throw new TypeError("Tokens must be an array");
+    }
+
     let html = "";
     let listOpen = null;
 
@@ -111,76 +16,86 @@ static #renderHTML(tokens) {
         }
     };
 
-    for (const t of tokens) {
+    for (const token of tokens) {
+        if (!token || typeof token.type !== "string") continue;
 
-        // Close list if current token isn't a list
-        if (listOpen && !["ul", "ol"].includes(t.type)) {
+        const isList = token.type === "ul" || token.type === "ol";
+
+        if (listOpen && (!isList || listOpen !== token.type)) {
             closeList();
         }
 
-        switch (t.type) {
-
+        switch (token.type) {
             case "heading": {
-                const id = t.text
-                    .toLowerCase()
-                    .trim()
-                    .replace(/[^\w\s-]/g, "")
-                    .replace(/\s+/g, "-");
+                const level = Number(token.level);
 
-                html += `<h${t.level} id="${id}">${this.#inline(t.text)}</h${t.level}>`;
+                if (!Number.isInteger(level) || level < 1 || level > 6) {
+                    break;
+                }
+
+                const text = String(token.text ?? "");
+                const id =
+                    text
+                        .toLowerCase()
+                        .trim()
+                        .replace(/[^\p{L}\p{N}\s-]/gu, "")
+                        .replace(/\s+/g, "-") || "heading";
+
+                html += `<h${level} id="${this.#escapeAttribute(id)}">${this.#inline(text)}</h${level}>`;
                 break;
             }
 
             case "paragraph":
-                html += `<p>${this.#inline(t.text)}</p>`;
+                html += `<p>${this.#inline(String(token.text ?? ""))}</p>`;
                 break;
 
             case "quote":
-                html += `<blockquote>${this.#inline(t.text)}</blockquote>`;
+                html += `<blockquote>${this.#inline(String(token.text ?? ""))}</blockquote>`;
                 break;
 
             case "ul":
             case "ol": {
-
-                if (listOpen !== t.type) {
+                if (listOpen !== token.type) {
                     closeList();
-                    html += `<${t.type}>`;
-                    listOpen = t.type;
+                    html += `<${token.type}>`;
+                    listOpen = token.type;
                 }
 
-                // Task list support
-                const task = t.text.match(/^\[( |x|X)\]\s+(.*)$/);
+                const text = String(token.text ?? "");
+                const task = text.match(/^\[( |x|X)\]\s+(.*)$/);
 
                 if (task) {
                     const checked = task[1].toLowerCase() === "x";
 
-                    html += `
-<li class="task-list-item">
-<input type="checkbox" disabled ${checked ? "checked" : ""}>
-${this.#inline(task[2])}
-</li>`;
+                    html +=
+                        `<li class="task-list-item">` +
+                        `<input type="checkbox" disabled${checked ? " checked" : ""} aria-label="${checked ? "Completed task" : "Incomplete task"}">` +
+                        ` ${this.#inline(task[2])}</li>`;
                 } else {
-                    html += `<li>${this.#inline(t.text)}</li>`;
+                    html += `<li>${this.#inline(text)}</li>`;
                 }
 
                 break;
             }
 
             case "code": {
-                const lang = t.language
-                    ? ` class="language-${this.#escape(t.language)}"`
+                const language = typeof token.language === "string"
+                    ? token.language
                     : "";
 
-                html += `<pre><code${lang}>${this.#escape(t.content)}</code></pre>`;
+                const langClass = /^[a-zA-Z0-9_+-]{1,40}$/.test(language)
+                    ? ` class="language-${this.#escapeAttribute(language)}"`
+                    : "";
+
+                html += `<pre><code${langClass}>${this.#escape(String(token.content ?? ""))}</code></pre>`;
                 break;
             }
 
             case "hr":
-                html += "<hr/>";
+                html += "<hr>";
                 break;
 
             default:
-                // Ignore unknown token types
                 break;
         }
     }
@@ -190,34 +105,14 @@ ${this.#inline(task[2])}
     return html;
 }
 
-    // ==========================
-    // INLINE PARSER
-    // ==========================
-    static #inline(text) {
-        return this.#escape(text)
-            .replace(/\*\*\*(.*?)\*\*\*/g, "<strong><em>$1</em></strong>")
-            .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-            .replace(/\*(.*?)\*/g, "<em>$1</em>")
-            .replace(/~~(.*?)~~/g, "<del>$1</del>")
-            .replace(/`([^`]+)`/g, "<code>$1</code>")
-            .replace(/!\[(.*?)\]\((.*?)\)/g, `<img src="$2" alt="$1"/>`)
-            .replace(/\[(.*?)\]\((.*?)\)/g, `<a href="$2">$1</a>`);
-    }
-
-    // ==========================
-    // ESCAPE
-    // ==========================
-    static #escape(str) {
-        return str
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
-    }
-
-    static #unescape(str) {
-        return str
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/&amp;/g, "&");
-    }
+// ==========================
+// ATTRIBUTE ESCAPING
+// ==========================
+static #escapeAttribute(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
 }
