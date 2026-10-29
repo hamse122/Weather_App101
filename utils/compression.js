@@ -109,25 +109,101 @@ static decompressRLE(compressed = "") {
     return output.join("");
 }
 
-    /* -------------------------------------------------------
-       JSON COMPRESSION (Optimized + Optional RLE)
-    -------------------------------------------------------- */
+/* -------------------------------------------------------
+   JSON COMPRESSION (Optimized + Optional RLE) — v3
+   - Circular reference protection
+   - BigInt support
+   - Input validation
+   - Compression metadata
+   - Backward-compatible decompression
+-------------------------------------------------------- */
 
-    static compressJSON(obj, { useRLE = false } = {}) {
-        if (obj === undefined) throw new Error("Cannot compress undefined");
-
-        const json = JSON.stringify(obj);
-        return useRLE ? this.compressRLE(json) : json;
+static compressJSON(obj, { useRLE = false } = {}) {
+    if (obj === undefined) {
+        throw new TypeError("Cannot compress undefined");
     }
 
-    static decompressJSON(data, { isRLE = false } = {}) {
-        try {
-            const json = isRLE ? this.decompressRLE(data) : data;
-            return JSON.parse(json);
-        } catch (err) {
-            throw new Error("Invalid compressed JSON: " + err.message);
+    let json;
+
+    try {
+        const seen = new WeakSet();
+
+        json = JSON.stringify(obj, (_, value) => {
+            if (typeof value === "bigint") {
+                return { __compressionType: "BigInt", value: value.toString() };
+            }
+
+            if (value && typeof value === "object") {
+                if (seen.has(value)) {
+                    throw new TypeError("Circular references are not supported");
+                }
+
+                seen.add(value);
+            }
+
+            return value;
+        });
+
+        if (json === undefined) {
+            throw new TypeError("Value cannot be serialized to JSON");
         }
+    } catch (err) {
+        throw new Error(`JSON compression failed: ${err.message}`, {
+            cause: err
+        });
     }
+
+    return useRLE
+        ? this.compressRLE(json)
+        : json;
+}
+
+static decompressJSON(data, { isRLE = false, maxLength = 10_000_000 } = {}) {
+    if (typeof data !== "string") {
+        throw new TypeError("Compressed data must be a string");
+    }
+
+    if (!Number.isSafeInteger(maxLength) || maxLength < 0) {
+        throw new TypeError("maxLength must be a non-negative safe integer");
+    }
+
+    if (data.length > maxLength) {
+        throw new RangeError("Compressed input exceeds maximum allowed length");
+    }
+
+    try {
+        const json = isRLE
+            ? this.decompressRLE(data)
+            : data;
+
+        if (typeof json !== "string") {
+            throw new TypeError("Decompression must return a string");
+        }
+
+        if (json.length > maxLength) {
+            throw new RangeError("Decompressed data exceeds maximum allowed length");
+        }
+
+        return JSON.parse(json, (_, value) => {
+            if (
+                value &&
+                typeof value === "object" &&
+                !Array.isArray(value) &&
+                value.__compressionType === "BigInt" &&
+                typeof value.value === "string" &&
+                /^-?\d+$/.test(value.value)
+            ) {
+                return BigInt(value.value);
+            }
+
+            return value;
+        });
+    } catch (err) {
+        throw new Error(`JSON decompression failed: ${err.message}`, {
+            cause: err
+        });
+    }
+}
 
     /* -------------------------------------------------------
        BASE64 (Transport Safe)
