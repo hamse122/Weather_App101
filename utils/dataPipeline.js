@@ -63,7 +63,14 @@ class DataPipeline {
     }
 
 /* =========================
-   HOOK SYSTEM (v2)
+   HOOK SYSTEM (v3)
+   - Priority-based execution
+   - Async support
+   - Parallel execution
+   - Once-only hooks
+   - Error isolation
+   - AbortSignal support
+   - Hook management
 ========================= */
 
 hook(type, fn, options = {}) {
@@ -78,34 +85,43 @@ hook(type, fn, options = {}) {
     const {
         priority = 0,
         once = false,
-        enabled = true
+        enabled = true,
+        id = null
     } = options;
 
-    if (!this.hooks[type]) {
+    if (!this.hooks) {
+        this.hooks = Object.create(null);
+    }
+
+    if (!Array.isArray(this.hooks[type])) {
         this.hooks[type] = [];
     }
 
-    // Prevent duplicate registrations
-    if (this.hooks[type].some(h => h.fn === fn)) {
+    const hooks = this.hooks[type];
+
+    if (hooks.some(h => h.fn === fn || (id && h.id === id))) {
         return this;
     }
 
     const entry = {
+        id: id ?? `${type}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
         fn,
         priority: Number.isFinite(priority) ? priority : 0,
         once: Boolean(once),
-        enabled: Boolean(enabled)
+        enabled: Boolean(enabled),
+        registeredAt: Date.now(),
+        executions: 0,
+        lastExecutedAt: null
     };
 
-    // Higher priority hooks run first
-    const index = this.hooks[type].findIndex(
+    const index = hooks.findIndex(
         hook => hook.priority < entry.priority
     );
 
     if (index === -1) {
-        this.hooks[type].push(entry);
+        hooks.push(entry);
     } else {
-        this.hooks[type].splice(index, 0, entry);
+        hooks.splice(index, 0, entry);
     }
 
     return this;
@@ -114,49 +130,79 @@ hook(type, fn, options = {}) {
 async runHooks(type, payload, options = {}) {
     const {
         stopOnError = false,
-        parallel = false
+        parallel = false,
+        signal = null,
+        context = this.context
     } = options;
 
-    const hooks = [...(this.hooks[type] || [])]
-        .filter(hook => hook.enabled !== false);
+    const hooks = [...(this.hooks?.[type] || [])]
+        .filter(h => h.enabled !== false);
 
     const errors = [];
+    const results = [];
 
     const execute = async hook => {
-        // Support both new hook entries and legacy function entries
-        const fn = typeof hook === "function" ? hook : hook.fn;
+        if (signal?.aborted) {
+            throw signal.reason ?? new Error("Hook execution aborted");
+        }
 
-        if (typeof fn !== "function") return;
+        const entry = typeof hook === "function"
+            ? { fn: hook, once: false }
+            : hook;
+
+        if (typeof entry.fn !== "function") return;
+
+        // Remove once-only hooks before execution to prevent duplicate calls.
+        if (entry.once && typeof hook !== "function") {
+            const registered = this.hooks[type];
+            const index = registered?.indexOf(entry);
+
+            if (index !== -1 && index != null) {
+                registered.splice(index, 1);
+            }
+        }
 
         try {
-            await fn(payload, this.context);
-        } catch (error) {
-            errors.push({ error, hook: fn });
+            const result = await entry.fn(payload, context);
 
-            if (stopOnError) {
-                throw error;
+            if (typeof hook !== "function") {
+                entry.executions = (entry.executions || 0) + 1;
+                entry.lastExecutedAt = Date.now();
             }
+
+            results.push({
+                id: entry.id ?? null,
+                status: "fulfilled",
+                result
+            });
+
+            return result;
+        } catch (error) {
+            errors.push({
+                id: entry.id ?? null,
+                error
+            });
+
+            results.push({
+                id: entry.id ?? null,
+                status: "rejected",
+                error
+            });
+
+            if (stopOnError) throw error;
 
             console.error(`[Hook:${type}]`, error);
-        } finally {
-            if (typeof hook !== "function" && hook.once) {
-                const registered = this.hooks[type];
-                const index = registered?.indexOf(hook);
-
-                if (index !== -1 && index != null) {
-                    registered.splice(index, 1);
-                }
-            }
+            return undefined;
         }
     };
 
     if (parallel) {
-        const results = await Promise.allSettled(
+        const settled = await Promise.allSettled(
             hooks.map(execute)
         );
 
         if (stopOnError) {
-            const failed = results.find(
+            const failed = settled.find(
                 result => result.status === "rejected"
             );
 
@@ -169,10 +215,70 @@ async runHooks(type, payload, options = {}) {
     }
 
     this.lastHookErrors = errors;
+    this.lastHookResults = results;
+
+    return {
+        type,
+        executed: results.length,
+        failed: errors.length,
+        results,
+        errors
+    };
+}
+
+/* Remove a specific hook */
+removeHook(type, fnOrId) {
+    const hooks = this.hooks?.[type];
+
+    if (!Array.isArray(hooks)) return false;
+
+    const index = hooks.findIndex(hook =>
+        typeof hook === "function"
+            ? hook === fnOrId
+            : hook.fn === fnOrId || hook.id === fnOrId
+    );
+
+    if (index === -1) return false;
+
+    hooks.splice(index, 1);
+    return true;
+}
+
+/* Enable or disable a hook */
+setHookEnabled(type, fnOrId, enabled = true) {
+    const hook = this.hooks?.[type]?.find(h =>
+        h.fn === fnOrId || h.id === fnOrId
+    );
+
+    if (!hook) return false;
+
+    hook.enabled = Boolean(enabled);
+    return true;
+}
+
+/* Clear hooks */
+clearHooks(type = null) {
+    if (type) {
+        if (this.hooks) this.hooks[type] = [];
+    } else {
+        this.hooks = Object.create(null);
+    }
 
     return this;
 }
 
+/* Get hook information */
+getHooks(type) {
+    return (this.hooks?.[type] || []).map(hook => ({
+        id: hook.id,
+        priority: hook.priority,
+        once: hook.once,
+        enabled: hook.enabled,
+        executions: hook.executions,
+        registeredAt: hook.registeredAt,
+        lastExecutedAt: hook.lastExecutedAt
+    }));
+}
 /* =========================
    Architecture
 ========================= */
