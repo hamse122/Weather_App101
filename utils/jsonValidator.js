@@ -303,29 +303,66 @@ static getType(value) {
 
         return obj;
     }
+// ===============================
+// Deep Merge (Safe) v2
+// ===============================
+static merge(target, source, options = {}) {
+    const {
+        arrayMode = "replace", // replace | concat | merge
+        clone = true
+    } = options;
 
-    // ===============================
-    // Deep Merge (Safe)
-    // ===============================
-    static merge(target, source) {
-        const output = this.deepClone(target);
+    const isPlainObject = value => {
+        if (value === null || typeof value !== "object") return false;
 
-        for (const key in source) {
-            if (key === "__proto__" || key === "constructor") continue;
+        const proto = Object.getPrototypeOf(value);
+        return proto === Object.prototype || proto === null;
+    };
 
-            const srcVal = source[key];
-            const tgtVal = output[key];
+    const blockedKeys = new Set([
+        "__proto__",
+        "constructor",
+        "prototype"
+    ]);
 
-            if (
-                this.getType(srcVal) === "object" &&
-                this.getType(tgtVal) === "object"
-            ) {
-                output[key] = this.merge(tgtVal, srcVal);
-            } else {
-                output[key] = this.deepClone(srcVal);
-            }
-        }
-
-        return output;
+    if (!isPlainObject(target) || !isPlainObject(source)) {
+        throw new TypeError("Target and source must be plain objects");
     }
+
+    const output = clone ? this.deepClone(target) : { ...target };
+
+    for (const key of Object.keys(source)) {
+        if (blockedKeys.has(key)) continue;
+
+        const srcVal = source[key];
+        const tgtVal = output[key];
+
+        if (Array.isArray(srcVal)) {
+            if (arrayMode === "concat" && Array.isArray(tgtVal)) {
+                output[key] = [
+                    ...tgtVal,
+                    ...(clone ? this.deepClone(srcVal) : srcVal)
+                ];
+            } else if (arrayMode === "merge" && Array.isArray(tgtVal)) {
+                output[key] = [
+                    ...tgtVal.slice(0, srcVal.length).map((value, index) =>
+                        isPlainObject(value) && isPlainObject(srcVal[index])
+                            ? this.merge(value, srcVal[index], options)
+                            : clone ? this.deepClone(srcVal[index]) : srcVal[index]
+                    ),
+                    ...srcVal.slice(tgtVal.length).map(value =>
+                        clone ? this.deepClone(value) : value
+                    )
+                ];
+            } else {
+                output[key] = clone ? this.deepClone(srcVal) : srcVal;
+            }
+        } else if (isPlainObject(srcVal) && isPlainObject(tgtVal)) {
+            output[key] = this.merge(tgtVal, srcVal, options);
+        } else {
+            output[key] = clone ? this.deepClone(srcVal) : srcVal;
+        }
+    }
+
+    return output;
 }
