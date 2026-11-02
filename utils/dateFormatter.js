@@ -46,15 +46,46 @@ const weekdaysFull = Object.freeze([
 const weekdaysShort = Object.freeze(weekdaysFull.map(d => d.slice(0,3)));
 
 /* --------------------------------
-   Week Number
+   Week Number (ISO 8601)
 -------------------------------- */
 
-function getWeek(date){
-  const d = new Date(Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()));
-  const day = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate()+4-day);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
-  return Math.ceil((((d-yearStart)/MS.day)+1)/7);
+function getWeek(date = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        throw new TypeError("A valid Date object is required");
+    }
+
+    // Convert to UTC to avoid timezone inconsistencies
+    const d = new Date(Date.UTC(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate()
+    ));
+
+    // ISO weekday: Monday = 1, Sunday = 7
+    const day = d.getUTCDay() || 7;
+
+    // Move to Thursday of the current week
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+
+    // First ISO week starts with the week containing January 4
+    const yearStart = new Date(
+        Date.UTC(d.getUTCFullYear(), 0, 4)
+    );
+
+    const yearStartDay = yearStart.getUTCDay() || 7;
+    yearStart.setUTCDate(
+        yearStart.getUTCDate() - yearStartDay + 1
+    );
+
+    const week = Math.floor(
+        (d - yearStart) / (7 * 24 * 60 * 60 * 1000)
+    ) + 1;
+
+    return {
+        week,
+        year: d.getUTCFullYear(),
+        iso: `${d.getUTCFullYear()}-W${String(week).padStart(2, "0")}`
+    };
 }
 
 /* --------------------------------
