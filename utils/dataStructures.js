@@ -1,5 +1,5 @@
 /* =========================================================
- * LINKED LIST (2026 Edition)
+ * LINKED LIST (v3 - Advanced 2026 Edition)
  * =======================================================*/
 
 class LinkedListNode {
@@ -11,6 +11,10 @@ class LinkedListNode {
 
 class LinkedList {
     constructor(iterable = []) {
+        if (iterable == null || typeof iterable[Symbol.iterator] !== "function") {
+            throw new TypeError("Expected an iterable");
+        }
+
         this.head = null;
         this.tail = null;
         this.length = 0;
@@ -20,10 +24,14 @@ class LinkedList {
         }
     }
 
+    /* =========================
+       CORE OPERATIONS
+    ========================= */
+
     append(value) {
         const node = new LinkedListNode(value);
 
-        if (!this.head) {
+        if (!this.tail) {
             this.head = this.tail = node;
         } else {
             this.tail.next = node;
@@ -36,6 +44,7 @@ class LinkedList {
 
     prepend(value) {
         const node = new LinkedListNode(value);
+
         node.next = this.head;
         this.head = node;
 
@@ -56,8 +65,8 @@ class LinkedList {
 
         node.next = previous.next;
         previous.next = node;
-        this.length++;
 
+        this.length++;
         return this;
     }
 
@@ -68,15 +77,20 @@ class LinkedList {
 
         if (index === 0) {
             removed = this.head;
-            this.head = this.head.next;
+            this.head = removed.next;
 
-            if (this.length === 1) this.tail = null;
+            if (this.length === 1) {
+                this.tail = null;
+            }
         } else {
             const previous = this._nodeAt(index - 1);
+
             removed = previous.next;
             previous.next = removed.next;
 
-            if (removed === this.tail) this.tail = previous;
+            if (removed === this.tail) {
+                this.tail = previous;
+            }
         }
 
         this.length--;
@@ -85,11 +99,22 @@ class LinkedList {
         return removed.value;
     }
 
-    getAt(index) {
-        if (!Number.isInteger(index) || index < 0 || index >= this.length) {
-            return null;
-        }
+    removeFirst() {
+        return this.isEmpty() ? null : this.removeAt(0);
+    }
 
+    removeLast() {
+        return this.isEmpty()
+            ? null
+            : this.removeAt(this.length - 1);
+    }
+
+    /* =========================
+       ACCESS & UPDATE
+    ========================= */
+
+    getAt(index) {
+        if (!this._isValidIndex(index)) return null;
         return this._nodeAt(index).value;
     }
 
@@ -99,15 +124,55 @@ class LinkedList {
         return this;
     }
 
+    getFirst() {
+        return this.head?.value ?? null;
+    }
+
+    getLast() {
+        return this.tail?.value ?? null;
+    }
+
+    /* =========================
+       SEARCH
+    ========================= */
+
     find(value) {
+        let current = this.head;
         let index = 0;
 
-        for (const item of this) {
-            if (Object.is(item, value)) return index;
+        while (current) {
+            if (Object.is(current.value, value)) {
+                return index;
+            }
+
+            current = current.next;
             index++;
         }
 
         return -1;
+    }
+
+    findNode(callback) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Callback must be a function");
+        }
+
+        let current = this.head;
+        let index = 0;
+
+        while (current) {
+            if (callback(current.value, index)) {
+                return {
+                    value: current.value,
+                    index
+                };
+            }
+
+            current = current.next;
+            index++;
+        }
+
+        return null;
     }
 
     includes(value) {
@@ -116,21 +181,28 @@ class LinkedList {
 
     remove(value) {
         const index = this.find(value);
+
         if (index === -1) return false;
 
         this.removeAt(index);
         return true;
     }
 
+    /* =========================
+       TRANSFORMATIONS
+    ========================= */
+
     reverse() {
         if (this.length < 2) return this;
 
         let previous = null;
         let current = this.head;
+
         this.tail = this.head;
 
         while (current) {
             const next = current.next;
+
             current.next = previous;
             previous = current;
             current = next;
@@ -140,9 +212,106 @@ class LinkedList {
         return this;
     }
 
+    map(callback) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Callback must be a function");
+        }
+
+        const result = new LinkedList();
+        let current = this.head;
+        let index = 0;
+
+        while (current) {
+            result.append(callback(current.value, index++));
+            current = current.next;
+        }
+
+        return result;
+    }
+
+    filter(callback) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Callback must be a function");
+        }
+
+        const result = new LinkedList();
+        let current = this.head;
+        let index = 0;
+
+        while (current) {
+            if (callback(current.value, index)) {
+                result.append(current.value);
+            }
+
+            current = current.next;
+            index++;
+        }
+
+        return result;
+    }
+
+    forEach(callback) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Callback must be a function");
+        }
+
+        let current = this.head;
+        let index = 0;
+
+        while (current) {
+            callback(current.value, index++, this);
+            current = current.next;
+        }
+    }
+
+    /* =========================
+       AGGREGATION
+    ========================= */
+
+    reduce(callback, initialValue) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Callback must be a function");
+        }
+
+        let current = this.head;
+        let index = 0;
+        let accumulator = initialValue;
+
+        if (arguments.length < 2) {
+            if (!current) {
+                throw new TypeError(
+                    "Reduce of empty list with no initial value"
+                );
+            }
+
+            accumulator = current.value;
+            current = current.next;
+            index = 1;
+        }
+
+        while (current) {
+            accumulator = callback(
+                accumulator,
+                current.value,
+                index++,
+                this
+            );
+
+            current = current.next;
+        }
+
+        return accumulator;
+    }
+
+    /* =========================
+       UTILITIES
+    ========================= */
+
     clear() {
-        this.head = this.tail = null;
+        this.head = null;
+        this.tail = null;
         this.length = 0;
+
         return this;
     }
 
@@ -155,11 +324,41 @@ class LinkedList {
     }
 
     toArray() {
-        return [...this];
+        return Array.from(this);
     }
 
     clone() {
         return new LinkedList(this);
+    }
+
+    toJSON() {
+        return this.toArray();
+    }
+
+    *values() {
+        yield* this;
+    }
+
+    *entries() {
+        let current = this.head;
+        let index = 0;
+
+        while (current) {
+            yield [index++, current.value];
+            current = current.next;
+        }
+    }
+
+    /* =========================
+       INTERNAL HELPERS
+    ========================= */
+
+    _isValidIndex(index) {
+        return (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < this.length
+        );
     }
 
     _nodeAt(index) {
@@ -173,16 +372,20 @@ class LinkedList {
     }
 
     _validateIndex(index, allowEnd = false) {
-        const upperBound = allowEnd ? this.length : this.length - 1;
+        const max = allowEnd ? this.length : this.length - 1;
 
         if (
             !Number.isInteger(index) ||
             index < 0 ||
-            index > upperBound
+            index > max
         ) {
             throw new RangeError("Index out of bounds");
         }
     }
+
+    /* =========================
+       ITERATORS
+    ========================= */
 
     *[Symbol.iterator]() {
         let current = this.head;
@@ -193,12 +396,24 @@ class LinkedList {
         }
     }
 
+    /* =========================
+       STATIC METHODS
+    ========================= */
+
     static fromArray(array) {
         if (!Array.isArray(array)) {
             throw new TypeError("Expected an array");
         }
 
         return new LinkedList(array);
+    }
+
+    static of(...values) {
+        return new LinkedList(values);
+    }
+
+    static isLinkedList(value) {
+        return value instanceof LinkedList;
     }
 }
 
