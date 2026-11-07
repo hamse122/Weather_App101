@@ -40,27 +40,75 @@ class DataPipeline {
         this.paused = false;
     }
 
-    /* =========================
-       STAGE MANAGEMENT
-    ========================= */
-    stage(name, processor, config = {}) {
-        this.stages.push({
-            name,
-            processor,
-            config: {
-                when: config.when,
-                retries: config.retries ?? this.options.retries,
-                timeout: config.timeout ?? this.options.timeout,
-                cache: config.cache ?? this.options.cache,
-                middleware: config.middleware || []
-            }
-        });
-        return this;
+/* =========================
+   STAGE MANAGEMENT (v2)
+========================= */
+
+stage(name, processor, config = {}) {
+    if (typeof name !== "string" || !name.trim()) {
+        throw new TypeError("Stage name must be a non-empty string");
     }
 
-    use(middleware) {
-        return this.stage('middleware', middleware);
+    if (typeof processor !== "function") {
+        throw new TypeError("Stage processor must be a function");
     }
+
+    if (this.stages.some(stage => stage.name === name)) {
+        throw new Error(`Stage "${name}" already exists`);
+    }
+
+    const retries = config.retries ?? this.options.retries;
+    const timeout = config.timeout ?? this.options.timeout;
+
+    if (!Number.isInteger(retries) || retries < 0) {
+        throw new RangeError("Retries must be a non-negative integer");
+    }
+
+    if (!Number.isFinite(timeout) || timeout < 0) {
+        throw new RangeError("Timeout must be a non-negative number");
+    }
+
+    if (
+        config.when !== undefined &&
+        typeof config.when !== "function"
+    ) {
+        throw new TypeError("Stage condition must be a function");
+    }
+
+    const middleware = config.middleware ?? [];
+
+    if (!Array.isArray(middleware) ||
+        middleware.some(fn => typeof fn !== "function")) {
+        throw new TypeError("Middleware must be an array of functions");
+    }
+
+    this.stages.push({
+        name,
+        processor,
+        config: Object.freeze({
+            when: config.when ?? null,
+            retries,
+            timeout,
+            cache: config.cache ?? this.options.cache,
+            middleware: [...middleware],
+            enabled: config.enabled ?? true,
+            metadata: { ...(config.metadata ?? {}) }
+        })
+    });
+
+    return this;
+}
+
+use(middleware) {
+    if (typeof middleware !== "function") {
+        throw new TypeError("Middleware must be a function");
+    }
+
+    return this.stage("middleware", middleware, {
+        retries: 0,
+        cache: false
+    });
+}
 
 /* =========================
    HOOK SYSTEM (v3)
