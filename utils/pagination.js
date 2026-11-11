@@ -85,50 +85,76 @@ export class Pagination {
         );
     }
 
-    /* ======================================================
-       CORE METHODS
-    ====================================================== */
+/* ======================================================
+   CORE METHODS (v2)
+====================================================== */
 
-    getCurrentPage() {
-        return this._slice();
+getCurrentPage() {
+    return this._slice();
+}
+
+goToPage(page) {
+    const target = Number(page);
+
+    if (!Number.isFinite(target) || !Number.isInteger(target)) {
+        throw new TypeError("Page must be a valid integer");
     }
 
-    goToPage(page) {
-        const target = Number(page);
+    const totalPages = Math.max(1, this.totalPages);
+    const previousPage = this.currentPage;
 
-        if (!Number.isInteger(target)) {
-            return this.getCurrentPage();
-        }
+    this.currentPage = Math.min(
+        Math.max(1, target),
+        totalPages
+    );
 
-        const previousPage = this.currentPage;
-
-        this.currentPage = Math.min(
-            Math.max(1, target),
-            this.totalPages
-        );
-
-        if (previousPage !== this.currentPage) {
-            this._emit();
-        }
-
-        return this.getCurrentPage();
+    if (previousPage !== this.currentPage) {
+        this._emit({
+            page: this.currentPage,
+            previousPage,
+            totalPages,
+            type: "pageChange",
+            timestamp: Date.now()
+        });
     }
 
-    nextPage() {
-        return this.goToPage(this.currentPage + 1);
-    }
+    return this.getCurrentPage();
+}
 
-    previousPage() {
-        return this.goToPage(this.currentPage - 1);
-    }
+nextPage() {
+    return this.goToPage(this.currentPage + 1);
+}
 
-    firstPage() {
-        return this.goToPage(1);
-    }
+previousPage() {
+    return this.goToPage(this.currentPage - 1);
+}
 
-    lastPage() {
-        return this.goToPage(this.totalPages);
-    }
+firstPage() {
+    return this.goToPage(1);
+}
+
+lastPage() {
+    return this.goToPage(Math.max(1, this.totalPages));
+}
+
+hasNextPage() {
+    return this.currentPage < this.totalPages;
+}
+
+hasPreviousPage() {
+    return this.currentPage > 1;
+}
+
+getPageInfo() {
+    return Object.freeze({
+        currentPage: this.currentPage,
+        totalPages: this.totalPages,
+        hasNextPage: this.hasNextPage(),
+        hasPreviousPage: this.hasPreviousPage(),
+        totalItems: this.totalItems ?? 0,
+        pageSize: this.pageSize
+    });
+}
 
     /* ======================================================
        DATA MANAGEMENT
