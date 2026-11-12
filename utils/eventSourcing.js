@@ -16,71 +16,134 @@ class EventStore {
         this.processedEventIds = new Set();   // idempotency
     }
 
-    /* ---------------- EVENTS ---------------- */
+/* ---------------- EVENTS (v2) ---------------- */
 
-    async appendEvent(
+async appendEvent(
+    aggregateId,
+    type,
+    data,
+    {
+        expectedVersion = null,
+        eventId = crypto.randomUUID(),
+        metadata = {}
+    } = {}
+) {
+    if (!aggregateId || typeof aggregateId !== "string") {
+        throw new TypeError("Valid aggregateId is required");
+    }
+
+    if (!type || typeof type !== "string") {
+        throw new TypeError("Event type must be a non-empty string");
+    }
+
+    if (!eventId || typeof eventId !== "string") {
+        throw new TypeError("Valid eventId is required");
+    }
+
+    if (this.processedEventIds.has(eventId)) {
+        return null;
+    }
+
+    if (
+        expectedVersion !== null &&
+        (!Number.isInteger(expectedVersion) || expectedVersion < 0)
+    ) {
+        throw new TypeError("expectedVersion must be a non-negative integer");
+    }
+
+    const stream = this._getStream(aggregateId);
+    const currentVersion = stream.length;
+
+    // Optimistic concurrency control
+    if (
+        expectedVersion !== null &&
+        expectedVersion !== currentVersion
+    ) {
+        throw new Error(
+            `Concurrency error: expected v${expectedVersion}, got v${currentVersion}`
+        );
+    }
+
+    const clone = value => {
+        if (typeof structuredClone === "function") {
+            return structuredClone(value);
+        }
+
+        return JSON.parse(JSON.stringify(value));
+    };
+
+    const event = Object.freeze({
+        id: eventId,
+        globalPosition: this.globalVersion + 1,
         aggregateId,
         type,
-        data,
-        {
-            expectedVersion = null,
-            eventId = crypto.randomUUID(),
-            metadata = {}
-        } = {}
-    ) {
-        if (this.processedEventIds.has(eventId)) {
-            return null; // idempotent replay protection
-        }
+        data: clone(data),
+        metadata: Object.freeze(clone(metadata)),
+        version: currentVersion + 1,
+        timestamp: this.clock()
+    });
 
-        const stream = this._getStream(aggregateId);
-        const currentVersion = stream.length;
+    // Persist event before updating derived state
+    stream.push(event);
+    this.globalVersion++;
+    this.processedEventIds.add(eventId);
 
-        // Optimistic concurrency control
-        if (expectedVersion !== null && expectedVersion !== currentVersion) {
-            throw new Error(
-                `Concurrency error: expected v${expectedVersion}, got v${currentVersion}`
-            );
-        }
-
-        const event = Object.freeze({
-            id: eventId,
-            globalPosition: ++this.globalVersion,
-            aggregateId,
-            type,
-            data: structuredClone(data),
-            metadata: {
-                ...metadata
-            },
-            version: currentVersion + 1,
-            timestamp: this.clock()
-        });
-
-        stream.push(event);
-        this.processedEventIds.add(eventId);
-
+    try {
         await this._updateProjections(event);
         await this._notifySubscribers(event);
 
-        if (event.version % this.snapshotInterval === 0) {
+        // Automatic snapshot generation
+        if (
+            this.snapshotInterval > 0 &&
+            event.version % this.snapshotInterval === 0
+        ) {
+            const state = await this.rebuildAggregate(
+                aggregateId,
+                metadata.reducer
+            );
+
             this.saveSnapshot(
                 aggregateId,
                 event.version,
-                await this.rebuildAggregate(aggregateId, metadata.reducer)
+                state,
+                { globalPosition: event.globalPosition }
             );
         }
-
-        return event;
+    } catch (error) {
+        // Event remains committed; projections can be rebuilt later
+        error.eventId = eventId;
+        error.aggregateId = aggregateId;
+        throw error;
     }
 
-    async getEvents(aggregateId, fromVersion = 1) {
-        const stream = this._getStream(aggregateId);
-        return stream.slice(fromVersion - 1);
+    return event;
+}
+
+async getEvents(aggregateId, fromVersion = 1, options = {}) {
+    if (!Number.isInteger(fromVersion) || fromVersion < 1) {
+        throw new TypeError("fromVersion must be a positive integer");
     }
 
-    getAggregateVersion(aggregateId) {
-        return this._getStream(aggregateId).length;
-    }
+    const {
+        toVersion = Infinity,
+        limit = Infinity,
+        types = null
+    } = options;
 
+    const stream = this._getStream(aggregateId);
+
+    return stream
+        .filter(event =>
+            event.version >= fromVersion &&
+            event.version <= toVersion &&
+            (!types || types.includes(event.type))
+        )
+        .slice(0, limit);
+}
+
+getAggregateVersion(aggregateId) {
+    return this._getStream(aggregateId).length;
+}
 /* ---------------- SNAPSHOTS (v2) ---------------- */
 
 saveSnapshot(aggregateId, version, state, metadata = {}) {
