@@ -65,6 +65,7 @@ export const easing = {
   easeOutSine: (t) => Math.sin((t * Math.PI) / 2),
   easeInOutSine: (t) => -(Math.cos(Math.PI * t) - 1) / 2,
 
+
   // Exponential
   easeInExpo: (t) => (t === 0 ? 0 : 2 ** (10 * t - 10)),
   easeOutExpo: (t) => (t === 1 ? 1 : 1 - 2 ** (-10 * t)),
