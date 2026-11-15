@@ -35,76 +35,183 @@ export class NotificationSystem {
         return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
 
-    // =====================
-    // CORE
-    // =====================
-    notify(input) {
-        let notification = {
-            id: NotificationSystem.uid(),
-            type: "info",
-            priority: 0,
-            message: "",
-            duration: 5000,
-            meta: {},
-            createdAt: Date.now(),
-            remaining: null,
-            ...input
-        };
+// =====================
+// CORE (v2)
+// =====================
 
-        // Middleware
-        for (const mw of this.middlewares) {
-            notification = mw(notification) || notification;
+notify(input = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new TypeError("Notification input must be an object");
+    }
+
+    let notification = {
+        id: NotificationSystem.uid(),
+        type: "info",
+        priority: 0,
+        message: "",
+        duration: 5000,
+        meta: {},
+        createdAt: Date.now(),
+        remaining: null,
+        ...input
+    };
+
+    if (typeof notification.message !== "string") {
+        throw new TypeError("Notification message must be a string");
+    }
+
+    if (
+        !Number.isFinite(notification.duration) ||
+        notification.duration < 0
+    ) {
+        throw new RangeError("Notification duration must be non-negative");
+    }
+
+    notification.priority = Number.isFinite(notification.priority)
+        ? notification.priority
+        : 0;
+
+    notification.meta = {
+        ...(notification.meta || {})
+    };
+
+    // Middleware pipeline
+    for (const mw of this.middlewares) {
+        const result = mw(notification);
+
+        if (result && typeof result === "object") {
+            notification = {
+                ...notification,
+                ...result
+            };
         }
+    }
 
-        // Duplicate handling
-        if (!this.options.allowDuplicates) {
-            for (const n of this.notifications.values()) {
-                if (n.message === notification.message && n.type === notification.type) {
-                    if (this.options.duplicateStrategy === "update") {
-                        this.update(n.id, notification);
-                        return n.id;
-                    }
-                    return null;
+    // Duplicate handling
+    if (!this.options.allowDuplicates) {
+        for (const existing of this.notifications.values()) {
+            if (
+                existing.message === notification.message &&
+                existing.type === notification.type
+            ) {
+                if (this.options.duplicateStrategy === "update") {
+                    this.update(existing.id, {
+                        ...notification,
+                        id: existing.id,
+                        createdAt: existing.createdAt
+                    });
+
+                    return existing.id;
                 }
+
+                return null;
             }
         }
+    }
 
-        this._enforceLimits(notification);
-        this.notifications.set(notification.id, notification);
+    // Enforce notification limits
+    this._enforceLimits(notification);
 
-        if (this.options.logHistory) {
-            this.history.push(notification);
+    // Store notification
+    this.notifications.set(notification.id, notification);
+
+    // History tracking
+    if (this.options.logHistory) {
+        this.history.push({ ...notification });
+
+        if (this.options.maxHistory > 0) {
+            while (this.history.length > this.options.maxHistory) {
+                this.history.shift();
+            }
         }
+    }
 
+    // Schedule automatic dismissal
+    if (notification.duration > 0) {
         this._schedule(notification);
-        this._emit("add", notification);
-        return notification.id;
     }
 
-    update(id, patch) {
-        const n = this.notifications.get(id);
-        if (!n) return;
+    this._emit("add", notification);
 
-        Object.assign(n, patch);
-        this._emit("update", n);
+    return notification.id;
+}
+
+update(id, patch = {}) {
+    const notification = this.notifications.get(id);
+
+    if (!notification) return false;
+
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+        throw new TypeError("Notification patch must be an object");
     }
 
-    remove(id) {
-        const n = this.notifications.get(id);
-        if (!n) return;
+    const updated = {
+        ...notification,
+        ...patch,
+        id: notification.id,
+        createdAt: notification.createdAt,
+        updatedAt: Date.now()
+    };
 
+    if (typeof updated.message !== "string") {
+        throw new TypeError("Notification message must be a string");
+    }
+
+    if (
+        !Number.isFinite(updated.duration) ||
+        updated.duration < 0
+    ) {
+        throw new RangeError("Notification duration must be non-negative");
+    }
+
+    // Reset timer when duration changes
+    if (patch.duration !== undefined) {
         this._clearTimer(id);
-        this.notifications.delete(id);
-        this._emit("remove", n);
+        updated.remaining = null;
+
+        if (updated.duration > 0) {
+            this._schedule(updated);
+        }
     }
 
-    clear() {
-        this.timers.forEach(t => clearTimeout(t));
-        this.timers.clear();
-        this.notifications.clear();
-        this._emit("clear", null);
+    this.notifications.set(id, updated);
+
+    this._emit("update", updated);
+
+    return true;
+}
+
+remove(id) {
+    const notification = this.notifications.get(id);
+
+    if (!notification) return false;
+
+    this._clearTimer(id);
+    this.notifications.delete(id);
+
+    this._emit("remove", notification);
+
+    return true;
+}
+
+clear() {
+    for (const timer of this.timers.values()) {
+        clearTimeout(timer);
     }
 
+    this.timers.clear();
+
+    const removed = Array.from(this.notifications.values());
+
+    this.notifications.clear();
+
+    this._emit("clear", {
+        count: removed.length,
+        notifications: removed
+    });
+
+    return removed.length;
+}
 // =====================
 // TIMERS
 // =====================
