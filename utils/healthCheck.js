@@ -9,6 +9,7 @@ class HealthCheck extends EventEmitter {
         this.timeout = options.timeout ?? 5000;
         this.concurrency = Math.max(1, options.concurrency ?? 5);
         this.cacheTTL = Math.max(0, options.cacheTTL ?? 0);
+        this.failFast = options.failFast ?? false;
 
         this.metrics = {
             totalRuns: 0,
@@ -22,11 +23,19 @@ class HealthCheck extends EventEmitter {
         };
 
         this.running = false;
+        this.destroyed = false;
+        this.currentRun = null;
     }
 
+    /* ============================================
+       REGISTRATION
+    ============================================ */
+
     register(name, checkFn, options = {}) {
-        if (!name || typeof name !== "string") {
-            throw new TypeError("Health check name must be a string");
+        this.ensureActive();
+
+        if (typeof name !== "string" || !name.trim()) {
+            throw new TypeError("Health check name must be a non-empty string");
         }
 
         if (typeof checkFn !== "function") {
@@ -37,30 +46,58 @@ class HealthCheck extends EventEmitter {
             throw new Error(`Check "${name}" already exists`);
         }
 
-        this.checks.set(name, {
+        const check = {
             name,
             checkFn,
             critical: options.critical !== false,
-            tags: Array.isArray(options.tags) ? [...options.tags] : [],
+            tags: [...new Set(options.tags || [])],
             timeout: options.timeout ?? this.timeout,
             retries: Math.max(0, options.retries ?? 0),
             retryDelay: Math.max(0, options.retryDelay ?? 0),
-            dependsOn: Array.isArray(options.dependsOn)
-                ? [...options.dependsOn]
-                : [],
+            dependsOn: [...new Set(options.dependsOn || [])],
 
             lastCheckedAt: null,
-            lastResult: null
-        });
+            lastResult: null,
+            inFlight: null
+        };
+
+        this.checks.set(name, check);
 
         return this;
     }
 
     unregister(name) {
+        this.ensureActive();
         return this.checks.delete(name);
     }
 
+    /* ============================================
+       EXECUTION
+    ============================================ */
+
     async run(filter = {}) {
+        this.ensureActive();
+
+        if (this.running) {
+            throw new Error("A health check run is already in progress");
+        }
+
+        const checks = this.selectChecks(filter);
+
+        this.running = true;
+        const started = Date.now();
+
+        this.currentRun = this._executeRun(checks, started);
+
+        try {
+            return await this.currentRun;
+        } finally {
+            this.running = false;
+            this.currentRun = null;
+        }
+    }
+
+    selectChecks(filter) {
         let checks = [...this.checks.values()];
 
         if (typeof filter === "string") {
@@ -70,7 +107,7 @@ class HealthCheck extends EventEmitter {
                 throw new Error(`Check "${filter}" not found`);
             }
 
-            checks = [check];
+            return [check];
         }
 
         if (filter.tags?.length) {
@@ -79,132 +116,130 @@ class HealthCheck extends EventEmitter {
             );
         }
 
-        const started = Date.now();
+        return checks;
+    }
 
-        this.running = true;
+    async _executeRun(checks, started) {
+        const results = [];
+        const completed = new Map();
 
         try {
-            const results = await this.runQueue(checks);
+            const pending = new Map(checks.map(check => [check.name, check]));
+
+            while (pending.size > 0) {
+                const ready = [...pending.values()].filter(check =>
+                    check.dependsOn.every(dep =>
+                        completed.has(dep) ||
+                        !this.checks.has(dep)
+                    )
+                );
+
+                if (!ready.length) {
+                    for (const check of pending.values()) {
+                        const result = this.createFailure(
+                            check.name,
+                            "Circular dependency or unresolved dependency detected"
+                        );
+
+                        results.push(result);
+                        completed.set(check.name, result);
+                    }
+
+                    break;
+                }
+
+                const batch = ready.slice(0, this.concurrency);
+
+                const batchResults = await Promise.all(
+                    batch.map(async check => {
+                        const missing = check.dependsOn.find(
+                            dep => !this.checks.has(dep)
+                        );
+
+                        if (missing) {
+                            return this.createFailure(
+                                check.name,
+                                `Missing dependency: ${missing}`
+                            );
+                        }
+
+                        const failedDependency = check.dependsOn.find(dep =>
+                            completed.get(dep)?.status === "fail" ||
+                            completed.get(dep)?.status === "skipped"
+                        );
+
+                        if (failedDependency) {
+                            return {
+                                name: check.name,
+                                status: "skipped",
+                                reason: `Dependency "${failedDependency}" failed`,
+                                timestamp: new Date().toISOString()
+                            };
+                        }
+
+                        return this.executeCheck(check);
+                    })
+                );
+
+                for (let i = 0; i < batch.length; i++) {
+                    const check = batch[i];
+                    const result = batchResults[i];
+
+                    results.push(result);
+                    completed.set(check.name, result);
+                    pending.delete(check.name);
+                }
+            }
 
             this.metrics.totalRuns++;
             this.metrics.lastRunAt = new Date().toISOString();
 
-            return {
+            const output = {
                 status: this.aggregateStatus(results),
                 duration: Date.now() - started,
                 timestamp: new Date().toISOString(),
-                metrics: { ...this.metrics },
+                metrics: this.getMetrics(),
                 details: Object.fromEntries(
                     results.map(result => [result.name, result])
                 )
             };
-        } finally {
-            this.running = false;
+
+            this.emit("complete", output);
+
+            return output;
+        } catch (error) {
+            this.emit("error", error);
+            throw error;
         }
     }
 
-    async runQueue(checks) {
-        const results = [];
-        const queue = [...checks];
-        const running = new Set();
-
-        const worker = async () => {
-            while (queue.length) {
-                const check = queue.shift();
-
-                if (!check) continue;
-
-                const promise = this.executeIfReady(check);
-
-                running.add(promise);
-
-                try {
-                    results.push(await promise);
-                } finally {
-                    running.delete(promise);
-                }
-            }
-        };
-
-        const workers = Array.from(
-            { length: Math.min(this.concurrency, checks.length) },
-            () => worker()
-        );
-
-        await Promise.all(workers);
-
-        return results;
-    }
-
-    async executeIfReady(check, stack = []) {
-        if (stack.includes(check.name)) {
-            return {
-                name: check.name,
-                status: "fail",
-                duration: 0,
-                attempts: 0,
-                error: {
-                    message:
-                        `Circular dependency detected: ` +
-                        [...stack, check.name].join(" -> ")
-                },
-                timestamp: new Date().toISOString()
-            };
-        }
-
-        const now = Date.now();
-
-        if (
-            check.lastResult &&
-            this.cacheTTL > 0 &&
-            check.lastCheckedAt &&
-            now - check.lastCheckedAt < this.cacheTTL
-        ) {
-            return {
-                ...check.lastResult,
-                cached: true
-            };
-        }
-
-        for (const dependencyName of check.dependsOn) {
-            const dependency = this.checks.get(dependencyName);
-
-            if (!dependency) {
-                return this.createFailure(
-                    check.name,
-                    `Missing dependency: ${dependencyName}`
-                );
-            }
-
-            const dependencyResult = await this.executeIfReady(
-                dependency,
-                [...stack, check.name]
-            );
-
-            if (
-                dependencyResult.status === "fail" ||
-                dependencyResult.status === "skipped"
-            ) {
-                this.metrics.skipped++;
-
-                return {
-                    name: check.name,
-                    status: "skipped",
-                    reason: `Dependency "${dependencyName}" is ${dependencyResult.status}`,
-                    timestamp: new Date().toISOString()
-                };
-            }
-        }
-
-        return this.executeCheck(check);
-    }
+    /* ============================================
+       INDIVIDUAL CHECK EXECUTION
+    ============================================ */
 
     async executeCheck(check) {
+        if (check.inFlight) {
+            return check.inFlight;
+        }
+
+        const execution = this._executeWithRetries(check);
+
+        check.inFlight = execution;
+
+        try {
+            return await execution;
+        } finally {
+            check.inFlight = null;
+        }
+    }
+
+    async _executeWithRetries(check) {
         const started = Date.now();
 
         let attempt = 0;
         let lastError = null;
         let status = "pass";
+        let output = null;
 
         this.emit("start", check.name);
 
@@ -215,11 +250,13 @@ class HealthCheck extends EventEmitter {
 
             try {
                 const result = await this.withTimeout(
-                    check.checkFn({
-                        signal: controller.signal,
-                        name: check.name,
-                        attempt
-                    }),
+                    Promise.resolve().then(() =>
+                        check.checkFn({
+                            signal: controller.signal,
+                            name: check.name,
+                            attempt
+                        })
+                    ),
                     check.timeout,
                     controller
                 );
@@ -230,6 +267,7 @@ class HealthCheck extends EventEmitter {
 
                 lastError = null;
                 break;
+
             } catch (error) {
                 lastError = error;
 
@@ -240,9 +278,7 @@ class HealthCheck extends EventEmitter {
                         error
                     });
 
-                    await this.sleep(
-                        check.retryDelay * attempt
-                    );
+                    await this.sleep(check.retryDelay * attempt);
                 } else {
                     status = check.critical ? "fail" : "warn";
                 }
@@ -251,7 +287,7 @@ class HealthCheck extends EventEmitter {
 
         const duration = Date.now() - started;
 
-        const output = {
+        output = {
             name: check.name,
             status,
             critical: check.critical,
@@ -261,8 +297,7 @@ class HealthCheck extends EventEmitter {
             error: lastError
                 ? {
                     name: lastError.name,
-                    message: lastError.message,
-                    stack: lastError.stack
+                    message: lastError.message
                 }
                 : null,
             timestamp: new Date().toISOString()
@@ -273,64 +308,14 @@ class HealthCheck extends EventEmitter {
 
         this.updateMetrics(duration, status);
 
-        this.emit(
-            status === "pass" ? "success" : "failure",
-            output
-        );
+        this.emit(status === "pass" ? "success" : "failure", output);
 
         return output;
     }
 
-    createFailure(name, message) {
-        return {
-            name,
-            status: "fail",
-            critical: true,
-            duration: 0,
-            attempts: 0,
-            cached: false,
-            error: { message },
-            timestamp: new Date().toISOString()
-        };
-    }
-
-    updateMetrics(duration, status) {
-        if (status === "pass") this.metrics.passes++;
-        if (status === "warn") this.metrics.warns++;
-        if (status === "fail") this.metrics.fails++;
-
-        this.metrics.totalDuration += duration;
-
-        const completed =
-            this.metrics.passes +
-            this.metrics.warns +
-            this.metrics.fails;
-
-        this.metrics.avgDuration =
-            completed > 0
-                ? Number(
-                    (this.metrics.totalDuration / completed).toFixed(2)
-                )
-                : 0;
-    }
-
-    aggregateStatus(results) {
-        if (
-            results.some(
-                result =>
-                    result.status === "fail" &&
-                    result.critical !== false
-            )
-        ) {
-            return "fail";
-        }
-
-        if (results.some(result => result.status === "warn")) {
-            return "warn";
-        }
-
-        return "pass";
-    }
+    /* ============================================
+       TIMEOUT MANAGEMENT
+    ============================================ */
 
     async withTimeout(promise, timeout, controller) {
         if (!timeout || timeout <= 0) {
@@ -345,7 +330,13 @@ class HealthCheck extends EventEmitter {
                 new Promise((_, reject) => {
                     timer = setTimeout(() => {
                         controller?.abort();
-                        reject(new Error("Health check timeout exceeded"));
+
+                        const error = new Error(
+                            "Health check timeout exceeded"
+                        );
+
+                        error.name = "TimeoutError";
+                        reject(error);
                     }, timeout);
                 })
             ]);
@@ -354,26 +345,88 @@ class HealthCheck extends EventEmitter {
         }
     }
 
-    sleep(ms) {
-        if (!ms) return Promise.resolve();
+    /* ============================================
+       METRICS
+    ============================================ */
 
-        return new Promise(resolve =>
-            setTimeout(resolve, ms)
-        );
-    }
+    updateMetrics(duration, status) {
+        if (status === "pass") this.metrics.passes++;
+        else if (status === "warn") this.metrics.warns++;
+        else if (status === "fail") this.metrics.fails++;
+        else if (status === "skipped") this.metrics.skipped++;
 
-    isHealthy() {
-        return ![...this.checks.values()].some(
-            check =>
-                check.critical &&
-                check.lastResult?.status === "fail"
-        );
+        this.metrics.totalDuration += duration;
+
+        const completed =
+            this.metrics.passes +
+            this.metrics.warns +
+            this.metrics.fails;
+
+        this.metrics.avgDuration = completed
+            ? Number(
+                (this.metrics.totalDuration / completed).toFixed(2)
+            )
+            : 0;
     }
 
     getMetrics() {
         return Object.freeze({
             ...this.metrics
         });
+    }
+
+    /* ============================================
+       STATUS
+    ============================================ */
+
+    aggregateStatus(results) {
+        if (results.some(r =>
+            r.status === "fail" && r.critical !== false
+        )) {
+            return "fail";
+        }
+
+        if (results.some(r =>
+            r.status === "fail" || r.status === "warn"
+        )) {
+            return "warn";
+        }
+
+        if (results.some(r => r.status === "skipped")) {
+            return "warn";
+        }
+
+        return "pass";
+    }
+
+    isHealthy() {
+        return ![...this.checks.values()].some(check =>
+            check.critical &&
+            check.lastResult?.status === "fail"
+        );
+    }
+
+    /* ============================================
+       UTILITIES
+    ============================================ */
+
+    createFailure(name, message) {
+        return {
+            name,
+            status: "fail",
+            critical: true,
+            duration: 0,
+            attempts: 0,
+            cached: false,
+            error: { message },
+            timestamp: new Date().toISOString()
+        };
+    }
+
+    sleep(ms) {
+        if (!ms) return Promise.resolve();
+
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     summary() {
@@ -399,6 +452,23 @@ class HealthCheck extends EventEmitter {
         }
 
         return this;
+    }
+
+    ensureActive() {
+        if (this.destroyed) {
+            throw new Error("HealthCheck instance has been destroyed");
+        }
+    }
+
+    destroy() {
+        if (this.running) {
+            throw new Error("Cannot destroy while checks are running");
+        }
+
+        this.checks.clear();
+        this.removeAllListeners();
+
+        this.destroyed = true;
     }
 }
 
