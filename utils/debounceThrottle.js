@@ -242,46 +242,174 @@ export function debounce(fn, wait = 0, options = {}) {
 }
 
 /* ============================================================
- * Adaptive Throttle
- * Automatically adjusts under load
+ * Adaptive Throttle (v2)
+ * Automatically adjusts execution intervals under load
+ * Features:
+ * - Adaptive execution timing
+ * - Leading and trailing execution
+ * - Async function support
+ * - Error handling
+ * - Configurable wait boundaries
+ * - Cancellation and flushing
+ * - Execution metrics
  * ============================================================
  */
 
 export function adaptiveThrottle(
-  fn,
-  {
-    minWait = 16,
-    maxWait = 500
-  } = {}
+    fn,
+    {
+        minWait = 16,
+        maxWait = 500,
+        multiplier = 2,
+        trailing = true,
+        leading = true,
+        onError = null
+    } = {}
 ) {
-  let wait = minWait;
-  let lastExecution = 0;
-
-  return (...args) => {
-    const now = performance.now();
+    if (typeof fn !== "function") {
+        throw new TypeError("Expected a function");
+    }
 
     if (
-      now - lastExecution >= wait
+        !Number.isFinite(minWait) ||
+        !Number.isFinite(maxWait) ||
+        minWait < 0 ||
+        maxWait < minWait
     ) {
-      const start =
-        performance.now();
-
-      fn(...args);
-
-      const duration =
-        performance.now() - start;
-
-      wait = Math.min(
-        maxWait,
-        Math.max(
-          minWait,
-          duration * 2
-        )
-      );
-
-      lastExecution = now;
+        throw new RangeError("Invalid throttle wait configuration");
     }
-  };
+
+    let wait = minWait;
+    let lastExecution = -Infinity;
+    let timer = null;
+    let lastArgs = null;
+    let lastThis = null;
+    let pending = false;
+    let destroyed = false;
+
+    const metrics = {
+        executions: 0,
+        skipped: 0,
+        errors: 0,
+        lastDuration: 0,
+        averageDuration: 0
+    };
+
+    const now = () =>
+        globalThis.performance?.now?.() ?? Date.now();
+
+    function execute() {
+        if (destroyed || !pending) return;
+
+        const args = lastArgs;
+        const context = lastThis;
+
+        lastArgs = null;
+        lastThis = null;
+        pending = false;
+
+        const start = now();
+        lastExecution = start;
+        metrics.executions++;
+
+        try {
+            const result = fn.apply(context, args);
+
+            if (result && typeof result.then === "function") {
+                return result
+                    .catch(handleError)
+                    .finally(() => updateMetrics(now() - start));
+            }
+
+            updateMetrics(now() - start);
+            return result;
+        } catch (error) {
+            updateMetrics(now() - start);
+            handleError(error);
+        }
+    }
+
+    function updateMetrics(duration) {
+        metrics.lastDuration = duration;
+
+        metrics.averageDuration +=
+            (duration - metrics.averageDuration) /
+            metrics.executions;
+
+        wait = Math.min(
+            maxWait,
+            Math.max(minWait, duration * multiplier)
+        );
+    }
+
+    function handleError(error) {
+        metrics.errors++;
+
+        if (typeof onError === "function") {
+            onError(error);
+        } else {
+            throw error;
+        }
+    }
+
+    function throttled(...args) {
+        if (destroyed) return;
+
+        lastArgs = args;
+        lastThis = this;
+        pending = true;
+
+        const elapsed = now() - lastExecution;
+        const remaining = Math.max(0, wait - elapsed);
+
+        if (remaining === 0 && leading) {
+            if (timer) {
+                clearTimeout(timer);
+                timer = null;
+            }
+
+            return execute();
+        }
+
+        metrics.skipped++;
+
+        if (trailing && !timer) {
+            timer = setTimeout(() => {
+                timer = null;
+                execute();
+            }, remaining);
+        }
+    }
+
+    throttled.cancel = () => {
+        if (timer) clearTimeout(timer);
+
+        timer = null;
+        lastArgs = null;
+        lastThis = null;
+        pending = false;
+    };
+
+    throttled.flush = () => {
+        if (timer) clearTimeout(timer);
+
+        timer = null;
+        return execute();
+    };
+
+    throttled.destroy = () => {
+        throttled.cancel();
+        destroyed = true;
+    };
+
+    throttled.getMetrics = () => ({
+        ...metrics,
+        currentWait: wait,
+        pending,
+        destroyed
+    });
+
+    return throttled;
 }
 
 /* ============================================================
