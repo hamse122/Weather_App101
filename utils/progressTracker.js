@@ -114,36 +114,46 @@ export class ProgressTracker {
         this.lastUpdateTime = now();
     }
 
- /* -------------------- Metrics (v2) -------------------- */
+/* -------------------- Metrics (v3) -------------------- */
 
 getPercentage() {
-    if (!Number.isFinite(this.total) || this.total <= 0) {
+    if (
+        !Number.isFinite(this.total) ||
+        this.total <= 0 ||
+        !Number.isFinite(this.current)
+    ) {
         return 0;
     }
 
     const percentage = (this.current / this.total) * 100;
 
     return Number(
-        Math.min(100, Math.max(0, percentage))
-            .toFixed(this.precision)
+        Math.min(100, Math.max(0, percentage)).toFixed(
+            Math.max(0, Math.min(20, this.precision ?? 2))
+        )
     );
 }
 
 getElapsedTime() {
-    if (!this.startTime) return 0;
+    if (!Number.isFinite(this.startTime) || this.startTime <= 0) {
+        return 0;
+    }
 
-    return Math.max(
-        0,
-        (this.endTime ?? now()) - this.startTime
-    );
+    const end = Number.isFinite(this.endTime)
+        ? this.endTime
+        : now();
+
+    return Math.max(0, end - this.startTime);
 }
 
 getAverageRate() {
     const elapsed = this.getElapsedTime();
 
-    return elapsed > 0
-        ? this.current / (elapsed / 1000) // units/sec
-        : 0;
+    if (elapsed <= 0 || !Number.isFinite(this.current)) {
+        return 0;
+    }
+
+    return this.current / (elapsed / 1000);
 }
 
 getEstimatedTimeRemaining() {
@@ -151,14 +161,15 @@ getEstimatedTimeRemaining() {
         this.state !== "running" ||
         !Number.isFinite(this.smoothedRate) ||
         this.smoothedRate <= 0 ||
-        this.samples < this.minSamplesForETA
+        !Number.isFinite(this.current) ||
+        !Number.isFinite(this.total) ||
+        this.samples < (this.minSamplesForETA ?? 1)
     ) {
         return null;
     }
 
     const remaining = Math.max(0, this.total - this.current);
 
-    // seconds remaining
     return remaining / this.smoothedRate;
 }
 
@@ -168,32 +179,48 @@ getInfo() {
     const averageRate = this.getAverageRate();
     const eta = this.getEstimatedTimeRemaining();
 
+    const remaining = Math.max(
+        0,
+        (Number.isFinite(this.total) ? this.total : 0) -
+        (Number.isFinite(this.current) ? this.current : 0)
+    );
+
+    const completed = percentage >= 100;
+
+    const completionTime =
+        eta !== null && Number.isFinite(eta)
+            ? new Date(Date.now() + eta * 1000)
+            : null;
+
     return Object.freeze({
         state: this.state,
 
         current: this.current,
         total: this.total,
-        remaining: Math.max(0, this.total - this.current),
+        remaining,
 
         percentage,
 
         elapsedTime: elapsed,
-        elapsedSeconds: +(elapsed / 1000).toFixed(3),
+        elapsedSeconds: Number((elapsed / 1000).toFixed(3)),
 
         estimatedTimeRemaining: eta,
-        estimatedCompletionTime:
-            eta != null
-                ? new Date(Date.now() + eta * 1000)
-                : null,
+        estimatedCompletionTime: completionTime,
 
-        averageRate,          // units/sec
-        smoothedRate: this.smoothedRate,
+        averageRate,
+        smoothedRate: Number.isFinite(this.smoothedRate)
+            ? this.smoothedRate
+            : 0,
 
-        completed: percentage >= 100,
+        completed,
         running: this.state === "running",
+        paused: this.state === "paused",
+        failed: this.state === "failed",
 
-        startTime: this.startTime,
-        endTime: this.endTime
+        startTime: this.startTime ?? null,
+        endTime: this.endTime ?? null,
+
+        samples: this.samples ?? 0
     });
 }
 
