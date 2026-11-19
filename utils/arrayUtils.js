@@ -1,67 +1,82 @@
 /**
  * =============================================
- *        ADVANCED ARRAY UTILITY FUNCTIONS
- *  High-performance, immutable, feature-rich
+ * ADVANCED ARRAY UTILITY FUNCTIONS (v2)
+ * High-performance, immutable, type-safe
  * =============================================
  */
 
 const isArray = Array.isArray;
 
 function getType(value) {
-  if (value === null) return "null";
-  if (isArray(value)) return "array";
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
 
-  const type = typeof value;
+    if (isArray(value)) return "array";
 
-  if (type === "object") {
-    return value?.constructor?.name || "object";
-  }
+    const type = typeof value;
 
-  return type;
+    if (type === "object") {
+        if (value instanceof Date) return "date";
+        if (value instanceof RegExp) return "regexp";
+        if (value instanceof Map) return "map";
+        if (value instanceof Set) return "set";
+        if (value instanceof Promise) return "promise";
+        if (ArrayBuffer.isView(value)) {
+            return value.constructor.name.toLowerCase();
+        }
+
+        return "object";
+    }
+
+    return type;
 }
 
 function ensureArray(arr, name = "value") {
-  if (!isArray(arr)) {
-    throw new TypeError(
-      `${name} must be an array. Received: ${getType(arr)}`
-    );
-  }
+    if (!isArray(arr)) {
+        throw new TypeError(
+            `${name} must be an array. Received: ${getType(arr)}`
+        );
+    }
 
-  return arr;
+    return arr;
 }
 
 function ensureFunction(fn, name = "callback") {
-  if (typeof fn !== "function") {
-    throw new TypeError(
-      `${name} must be a function. Received: ${getType(fn)}`
-    );
-  }
+    if (typeof fn !== "function") {
+        throw new TypeError(
+            `${name} must be a function. Received: ${getType(fn)}`
+        );
+    }
 
-  return fn;
+    return fn;
 }
 
 function ensureNonEmptyArray(arr, name = "array") {
-  ensureArray(arr, name);
+    ensureArray(arr, name);
 
-  if (arr.length === 0) {
-    throw new RangeError(`${name} must not be empty`);
-  }
+    if (arr.length === 0) {
+        throw new RangeError(`${name} must not be empty`);
+    }
 
-  return arr;
+    return arr;
 }
 
 function ensureIndex(index, length, name = "index") {
-  if (!Number.isInteger(index)) {
-    throw new TypeError(`${name} must be an integer`);
-  }
+    if (!Number.isSafeInteger(index)) {
+        throw new TypeError(`${name} must be a safe integer`);
+    }
 
-  if (index < 0 || index >= length) {
-    throw new RangeError(
-      `${name} must be between 0 and ${Math.max(0, length - 1)}. Received: ${index}`
-    );
-  }
+    if (!Number.isSafeInteger(length) || length < 0) {
+        throw new RangeError("Array length must be a non-negative safe integer");
+    }
 
-  return index;
+    if (index < 0 || index >= length) {
+        throw new RangeError(
+            `${name} must be between 0 and ${Math.max(0, length - 1)}. Received: ${index}`
+        );
+    }
+
+    return index;
 }
 
 /* ---------------------------------- */
