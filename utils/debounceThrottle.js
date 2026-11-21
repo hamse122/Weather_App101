@@ -412,50 +412,82 @@ export function adaptiveThrottle(
     return throttled;
 }
 
-/* ============================================================
- * Token Bucket Rate Limiter
- * ============================================================
- */
+/* ============================
+   Utilities
+============================ */
 
-export class TokenBucket {
-  constructor({
-    capacity = 10,
-    refillRate = 1
-  } = {}) {
-    this.capacity = capacity;
-    this.tokens = capacity;
-    this.refillRate = refillRate;
+_clone(obj) {
+    if (obj == null) return obj;
 
-    this.lastRefill = Date.now();
-  }
-
-  refill() {
-    const now = Date.now();
-
-    const elapsed =
-      (now - this.lastRefill) / 1000;
-
-    const refillAmount =
-      elapsed * this.refillRate;
-
-    this.tokens = Math.min(
-      this.capacity,
-      this.tokens + refillAmount
-    );
-
-    this.lastRefill = now;
-  }
-
-  consume(count = 1) {
-    this.refill();
-
-    if (this.tokens >= count) {
-      this.tokens -= count;
-      return true;
+    // Modern browsers / Node.js 17+
+    if (typeof structuredClone === "function") {
+        try {
+            return structuredClone(obj);
+        } catch {
+            // Fall through
+        }
     }
 
-    return false;
-  }
+    // Fallback for plain JSON objects
+    try {
+        return JSON.parse(JSON.stringify(obj));
+    } catch {
+        // Last resort (shallow copy)
+        if (Array.isArray(obj)) {
+            return [...obj];
+        }
+
+        if (typeof obj === "object") {
+            return { ...obj };
+        }
+
+        return obj;
+    }
+}
+
+_hash(key) {
+    const input =
+        typeof key === "string"
+            ? key
+            : JSON.stringify(
+                  key,
+                  Object.keys(key || {}).sort()
+              );
+
+    return murmurhash.v3(input);
+}
+
+async _persist(key, value, options = {}) {
+    if (typeof this.storage?.set !== "function") {
+        return false;
+    }
+
+    try {
+        if (value == null && typeof this.storage.delete === "function") {
+            await this.storage.delete(key);
+            return true;
+        }
+
+        await this.storage.set(key, value, options);
+        return true;
+    } catch (err) {
+        this.logger?.error?.("Persist failed:", err);
+        return false;
+    }
+}
+
+async _load(key, defaultValue = null) {
+    if (typeof this.storage?.get !== "function") {
+        return defaultValue;
+    }
+
+    try {
+        const value = await this.storage.get(key);
+        return value ?? defaultValue;
+    } catch (err) {
+        this.logger?.error?.("Load failed:", err);
+        return defaultValue;
+    }
 }
 
 /* ============================================================
