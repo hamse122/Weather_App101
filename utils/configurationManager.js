@@ -52,106 +52,119 @@ export class ConfigurationManager {
                 console.error("[ConfigurationManager]", error);
             });
     }
+/* ============================================================
+   STORAGE (v2)
+============================================================ */
 
-    /* ============================================================
-       STORAGE
-    ============================================================ */
-
-    resolveStorage(storage) {
-        if (storage !== undefined) return storage;
-
-        if (typeof window !== "undefined") {
-            try {
-                return window.localStorage;
-            } catch {
-                return null;
-            }
-        }
-
-        return null;
+resolveStorage(storage) {
+    if (storage !== undefined) {
+        return storage;
     }
 
-    async persist() {
-        if (!this.autoSave || !this.storage) return;
-
-        const data = JSON.stringify(this.config);
-
+    if (typeof globalThis !== "undefined") {
         try {
-            if (typeof this.storage.setItem === "function") {
-                const result = this.storage.setItem(
-                    this.storageKey,
-                    data
-                );
+            const candidate = globalThis.localStorage;
 
-                if (result instanceof Promise) {
-                    await result;
-                }
-
-                return;
+            if (
+                candidate &&
+                typeof candidate.getItem === "function" &&
+                typeof candidate.setItem === "function"
+            ) {
+                return candidate;
             }
-
-            if (typeof this.storage.set === "function") {
-                await this.storage.set(this.storageKey, data);
-            }
-        } catch (error) {
-            this.onError(error);
+        } catch {
+            // Storage may be blocked or unavailable
         }
     }
 
-    async loadFromStorage(options = {}) {
-        if (!this.storage) return this;
+    return null;
+}
 
-        try {
-            let raw;
+async persist() {
+    if (!this.autoSave || !this.storage) return false;
 
-            if (typeof this.storage.getItem === "function") {
-                raw = this.storage.getItem(this.storageKey);
-            } else if (typeof this.storage.get === "function") {
-                raw = await this.storage.get(this.storageKey);
-            }
+    let data;
 
-            if (raw instanceof Promise) {
-                raw = await raw;
-            }
+    try {
+        data = JSON.stringify(this.config);
 
-            if (!raw) return this;
-
-            const parsed =
-                typeof raw === "string"
-                    ? JSON.parse(raw)
-                    : raw;
-
-            this.load(parsed, options);
-        } catch (error) {
-            this.onError(error);
+        if (data === undefined) {
+            throw new TypeError("Configuration is not serializable");
         }
+
+        if (typeof this.storage.setItem === "function") {
+            await this.storage.setItem(this.storageKey, data);
+        } else if (typeof this.storage.set === "function") {
+            await this.storage.set(this.storageKey, data);
+        } else {
+            throw new TypeError("Invalid storage adapter: missing set method");
+        }
+
+        return true;
+
+    } catch (error) {
+        this.onError(error);
+        return false;
+    }
+}
+
+async loadFromStorage(options = {}) {
+    if (!this.storage) return this;
+
+    try {
+        let raw;
+
+        if (typeof this.storage.getItem === "function") {
+            raw = await this.storage.getItem(this.storageKey);
+        } else if (typeof this.storage.get === "function") {
+            raw = await this.storage.get(this.storageKey);
+        } else {
+            throw new TypeError("Invalid storage adapter: missing get method");
+        }
+
+        if (raw == null || raw === "") return this;
+
+        const parsed = typeof raw === "string"
+            ? JSON.parse(raw)
+            : raw;
+
+        if (
+            !parsed ||
+            typeof parsed !== "object" ||
+            Array.isArray(parsed)
+        ) {
+            throw new TypeError("Invalid stored configuration");
+        }
+
+        await this.load(parsed, options);
 
         return this;
+
+    } catch (error) {
+        this.onError(error);
+        return this;
     }
+}
 
-    async clearStorage() {
-        if (!this.storage) return;
+async clearStorage() {
+    if (!this.storage) return false;
 
-        try {
-            if (typeof this.storage.removeItem === "function") {
-                const result = this.storage.removeItem(
-                    this.storageKey
-                );
-
-                if (result instanceof Promise) {
-                    await result;
-                }
-
-                return;
-            }
-
-            if (typeof this.storage.delete === "function") {
-                await this.storage.delete(this.storageKey);
-            }
-        } catch (error) {
-            this.onError(error);
+    try {
+        if (typeof this.storage.removeItem === "function") {
+            await this.storage.removeItem(this.storageKey);
+        } else if (typeof this.storage.delete === "function") {
+            await this.storage.delete(this.storageKey);
+        } else {
+            throw new TypeError("Invalid storage adapter: missing delete method");
         }
+
+        return true;
+
+    } catch (error) {
+        this.onError(error);
+        return false;
     }
+}
 
     /* ============================================================
        HELPERS
