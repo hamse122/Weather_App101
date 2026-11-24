@@ -157,7 +157,7 @@ class DatabaseManager {
     }
 
 /* ---------------------------------- */
-/* Query Execution                    */
+/* Query Execution (v2)               */
 /* ---------------------------------- */
 
 async query(fn, config = {}) {
@@ -165,27 +165,135 @@ async query(fn, config = {}) {
         throw new TypeError("Query callback must be a function");
     }
 
-    const driver = config.driver ?? this.defaultDriver;
-    const key = this.getPoolKey(driver, config);
+    const {
+        driver = this.defaultDriver,
+        timeout = 30000,
+        retries = 0,
+        retryDelay = 500,
+        signal,
+        ...connectionConfig
+    } = config;
 
-    const conn = await this.connect(config);
+    const key = this.getPoolKey(driver, connectionConfig);
     const pool = this.pools.get(key);
 
     if (!pool) {
         throw new Error(`Connection pool '${key}' not found`);
     }
 
+    if (signal?.aborted) {
+        throw signal.reason ?? new Error("Query aborted");
+    }
+
+    let conn;
+    let released = false;
+
+    const release = async () => {
+        if (released || !conn) return;
+
+        released = true;
+        await pool.release(conn);
+    };
+
     try {
-        const builder = this.createQueryBuilder(config);
-        return await fn(conn, builder);
+        conn = await this.connect({
+            ...connectionConfig,
+            driver
+        });
+
+        if (!conn) {
+            throw new Error("Failed to acquire database connection");
+        }
+
+        if (signal?.aborted) {
+            throw signal.reason ?? new Error("Query aborted");
+        }
+
+        const builder = this.createQueryBuilder({
+            ...connectionConfig,
+            driver
+        });
+
+        let attempt = 0;
+
+        while (true) {
+            try {
+                const execution = Promise.resolve(
+                    fn(conn, builder)
+                );
+
+                if (!timeout && !signal) {
+                    return await execution;
+                }
+
+                const controls = [];
+
+                if (timeout > 0) {
+                    controls.push(
+                        new Promise((_, reject) => {
+                            const timer = setTimeout(
+                                () => reject(
+                                    new Error(`Query timed out after ${timeout}ms`)
+                                ),
+                                timeout
+                            );
+
+                            execution.finally(() => clearTimeout(timer)).catch(() => {});
+                        })
+                    );
+                }
+
+                if (signal) {
+                    controls.push(
+                        new Promise((_, reject) => {
+                            const abort = () => reject(
+                                signal.reason ?? new Error("Query aborted")
+                            );
+
+                            signal.addEventListener("abort", abort, {
+                                once: true
+                            });
+
+                            execution.finally(() =>
+                                signal.removeEventListener("abort", abort)
+                            ).catch(() => {});
+                        })
+                    );
+                }
+
+                return await Promise.race([
+                    execution,
+                    ...controls
+                ]);
+
+            } catch (error) {
+                if (
+                    signal?.aborted ||
+                    attempt >= retries ||
+                    error.retryable === false
+                ) {
+                    throw error;
+                }
+
+                attempt++;
+
+                await new Promise(resolve =>
+                    setTimeout(resolve, retryDelay * attempt)
+                );
+            }
+        }
+
     } catch (error) {
         error.queryPool = key;
+        error.queryDriver = driver;
+        error.queryAttempts = retries + 1;
+
         throw error;
+
     } finally {
-        pool.release(conn);
+        await release();
     }
 }
-
     /* ---------------------------------- */
     /* Query Builder (Safe)               */
     /* ---------------------------------- */
