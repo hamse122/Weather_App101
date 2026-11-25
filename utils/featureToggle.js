@@ -35,7 +35,7 @@ export class FeatureToggle {
     }
 }
 /* ==================================================
-   MIDDLEWARE PIPELINE (v2)
+   MIDDLEWARE PIPELINE (v3)
 ================================================== */
 
 use(fn, options = {}) {
@@ -43,66 +43,110 @@ use(fn, options = {}) {
         throw new TypeError("Middleware must be a function");
     }
 
-    this.middlewares.push({
+    const middleware = {
+        id: options.id ?? crypto.randomUUID(),
         fn,
-        priority: options.priority ?? 0,
+        priority: Number.isFinite(options.priority)
+            ? options.priority
+            : 0,
         enabled: options.enabled !== false,
-        once: !!options.once
-    });
+        once: options.once === true,
+        createdAt: Date.now()
+    };
+
+    this.middlewares.push(middleware);
 
     // Higher priority executes first
     this.middlewares.sort(
         (a, b) => b.priority - a.priority
     );
 
-    return this;
+    return middleware.id;
 }
 
-async runMiddleware(context, result) {
+async runMiddleware(context = {}, result) {
     let res = result;
-    const remove = [];
 
-    for (const middleware of this.middlewares) {
+    // Snapshot prevents registration changes affecting current execution
+    const pipeline = [...this.middlewares];
+    const executedOnce = new Set();
 
+    for (const middleware of pipeline) {
         if (!middleware.enabled) continue;
 
         try {
-            const output = await middleware.fn(
-                context,
-                res
-            );
+            const output = await middleware.fn(context, res);
 
             if (output !== undefined) {
                 res = output;
             }
 
             if (middleware.once) {
-                remove.push(middleware);
+                executedOnce.add(middleware.id);
             }
 
-        } catch (e) {
+        } catch (error) {
             console.error(
                 "[FeatureToggle middleware]",
-                e
+                error
             );
 
             context.middlewareErrors ??= [];
-            context.middlewareErrors.push(e);
+            context.middlewareErrors.push({
+                id: middleware.id,
+                error
+            });
 
-            if (context.stopOnMiddlewareError) {
-                throw e;
+            if (context.stopOnMiddlewareError === true) {
+                throw error;
             }
         }
     }
 
-    // Remove one-time middleware
-    if (remove.length) {
+    // Remove successfully executed one-time middleware
+    if (executedOnce.size) {
         this.middlewares = this.middlewares.filter(
-            mw => !remove.includes(mw)
+            mw => !executedOnce.has(mw.id)
         );
     }
 
     return res;
+}
+
+removeMiddleware(id) {
+    const initialLength = this.middlewares.length;
+
+    this.middlewares = this.middlewares.filter(
+        mw => mw.id !== id
+    );
+
+    return this.middlewares.length !== initialLength;
+}
+
+enableMiddleware(id) {
+    const middleware = this.middlewares.find(
+        mw => mw.id === id
+    );
+
+    if (!middleware) return false;
+
+    middleware.enabled = true;
+    return true;
+}
+
+disableMiddleware(id) {
+    const middleware = this.middlewares.find(
+        mw => mw.id === id
+    );
+
+    if (!middleware) return false;
+
+    middleware.enabled = false;
+    return true;
+}
+
+clearMiddlewares() {
+    this.middlewares.length = 0;
 }
     /* ==================================================
        SEGMENTS
