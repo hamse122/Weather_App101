@@ -132,62 +132,136 @@ class LinkedList {
         return this.tail?.value ?? null;
     }
 
-    /* =========================
-       SEARCH
-    ========================= */
+/* =========================
+   SEARCH (v2)
+========================= */
 
-    find(value) {
-        let current = this.head;
-        let index = 0;
+find(value, fromIndex = 0) {
+    let current = this.head;
+    let index = 0;
 
-        while (current) {
-            if (Object.is(current.value, value)) {
-                return index;
-            }
+    while (current && index < fromIndex) {
+        current = current.next;
+        index++;
+    }
 
-            current = current.next;
+    while (current) {
+        if (Object.is(current.value, value)) {
+            return index;
+        }
+
+        current = current.next;
+        index++;
+    }
+
+    return -1;
+}
+
+findNode(callback) {
+    if (typeof callback !== "function") {
+        throw new TypeError("Callback must be a function");
+    }
+
+    let current = this.head;
+    let index = 0;
+
+    while (current) {
+        if (callback(current.value, index, current)) {
+            return {
+                value: current.value,
+                index,
+                node: current
+            };
+        }
+
+        current = current.next;
+        index++;
+    }
+
+    return null;
+}
+
+includes(value) {
+    return this.find(value) !== -1;
+}
+
+remove(value) {
+    let current = this.head;
+    let index = 0;
+
+    while (current) {
+        if (Object.is(current.value, value)) {
+            this.removeAt(index);
+            return true;
+        }
+
+        current = current.next;
+        index++;
+    }
+
+    return false;
+}
+
+findAll(callback) {
+    if (typeof callback !== "function") {
+        throw new TypeError("Callback must be a function");
+    }
+
+    const results = [];
+    let current = this.head;
+    let index = 0;
+
+    while (current) {
+        if (callback(current.value, index, current)) {
+            results.push({
+                value: current.value,
+                index
+            });
+        }
+
+        current = current.next;
+        index++;
+    }
+
+    return results;
+}
+
+findLast(value) {
+    let current = this.tail;
+    let index = this.size - 1;
+
+    while (current) {
+        if (Object.is(current.value, value)) {
+            return index;
+        }
+
+        current = current.prev;
+        index--;
+    }
+
+    return -1;
+}
+
+removeAll(value) {
+    let current = this.head;
+    let removed = 0;
+    let index = 0;
+
+    while (current) {
+        const next = current.next;
+
+        if (Object.is(current.value, value)) {
+            this.removeAt(index);
+            removed++;
+        } else {
             index++;
         }
 
-        return -1;
+        current = next;
     }
 
-    findNode(callback) {
-        if (typeof callback !== "function") {
-            throw new TypeError("Callback must be a function");
-        }
-
-        let current = this.head;
-        let index = 0;
-
-        while (current) {
-            if (callback(current.value, index)) {
-                return {
-                    value: current.value,
-                    index
-                };
-            }
-
-            current = current.next;
-            index++;
-        }
-
-        return null;
-    }
-
-    includes(value) {
-        return this.find(value) !== -1;
-    }
-
-    remove(value) {
-        const index = this.find(value);
-
-        if (index === -1) return false;
-
-        this.removeAt(index);
-        return true;
-    }
-
+    return removed;
+}
     /* =========================
        TRANSFORMATIONS
     ========================= */
